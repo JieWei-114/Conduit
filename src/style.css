@@ -1,0 +1,405 @@
+/* ── design tokens ───────────────────────────────────────────────────────── */
+:root {
+  color-scheme: light dark;
+  --bg: #0e1116;
+  --bg-elev: #161b22;
+  --bg-inset: #0b0e13;
+  --panel: #12161c;
+  --border: #232a33;
+  --border-soft: #1c222a;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --text-faint: #6a737d;
+  --accent: #6172a0;
+  --accent-dim: #2b3139;
+  --accent-strong: #58a6ff;
+  --ok: #3fb950;
+  --bad: #f85149;
+  --warn: #d29922;
+  --purple: #a371f7;
+  --orange: #db6d28;
+  --cyan: #39c5cf;
+  --pink: #db61a2;
+  /* status/tint backgrounds — per-theme so they read on both bg colors */
+  --ok-bg: #3fb95022;
+  --bad-bg: #f8514922;
+  --warn-bg: #d2992222;
+  --radius: 8px;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff; --bg-elev: #f6f8fa; --bg-inset: #f0f2f5; --panel: #ffffff;
+    --border: #d0d7de; --border-soft: #e4e8ec; --text: #1f2328;
+    --text-dim: #57606a; --text-faint: #8c959f; --accent-dim: #e2e8f0;
+    /* darker accents so text/dots keep contrast on white (AA) */
+    --accent: #4b5563; --accent-strong: #0969da;
+    --ok: #1a7f37; --bad: #cf222e; --warn: #9a6700;
+    --purple: #8250df; --orange: #bc4c00; --cyan: #1b7c83; --pink: #bf3989;
+    --ok-bg: #1a7f3718; --bad-bg: #cf222e18; --warn-bg: #9a670018;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: var(--sans); margin: 0; background: var(--bg); color: var(--text);
+  font-size: 14px; -webkit-font-smoothing: antialiased;
+}
+
+/* ── app shell ───────────────────────────────────────────────────────────── */
+.app { display: flex; flex-direction: column; height: 100vh; }
+.topbar {
+  display: flex; align-items: center; gap: 4px; padding: 0 16px; height: 48px;
+  border-bottom: 1px solid var(--border); background: var(--bg-elev); flex: 0 0 auto;
+  overflow-x: auto; scrollbar-width: thin;
+}
+.brand {
+  font-weight: 700; margin-right: 18px; letter-spacing: .3px; font-size: 15px;
+  color: var(--text); flex: 0 0 auto;
+}
+.toptab {
+  font: 600 13px var(--sans); padding: 6px 14px; border-radius: 4px;
+  cursor: pointer; color: var(--text-dim); transition: all .12s;
+  flex: 0 0 auto; white-space: nowrap;
+}
+.reset-all { margin-left: auto; color: var(--text-faint); }
+.toptab:hover { color: var(--text); background: var(--border-soft); }
+.toptab.active { color: #fff; background: var(--accent); }
+.panel { flex: 1 1 auto; min-height: 0; }
+.layout { display: grid; grid-template-columns: 620px 1fr; height: 100%; }
+.left {
+  padding: 18px; overflow-y: auto; border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+.right { padding: 18px; overflow-y: auto; background: var(--bg); }
+
+/* ── headings / labels ───────────────────────────────────────────────────── */
+h3 { margin: 0 0 12px; display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.badge {
+  font: 500 11px var(--mono); color: var(--text-faint); background: var(--bg-inset);
+  padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border-soft);
+}
+label { display: block; font-size: 11px; color: var(--text-dim); margin: 13px 0 4px;
+  font-weight: 500; letter-spacing: .2px; }
+.count { color: var(--text-faint); font-weight: 400; }
+.hint { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+.error { font-size: 12px; color: var(--bad); margin-top: 4px; }
+
+/* ── form controls ───────────────────────────────────────────────────────── */
+input, select, textarea {
+  width: 100%; padding: 7px 9px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-inset); color: var(--text);
+  font: 13px/1.4 var(--mono); transition: border-color .12s, box-shadow .12s;
+}
+input::placeholder, textarea::placeholder { color: var(--text-faint); }
+input:focus, select:focus, textarea:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
+}
+select { cursor: pointer; }
+textarea { resize: none; }
+.saved-select { max-width: 160px; flex: 0 0 auto; }
+.mb4 { margin-bottom: 5px; }
+.row { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; } .row > div { flex: 1; }
+
+/* ── buttons ─────────────────────────────────────────────────────────────── */
+button {
+  margin-top: 16px; width: 100%; padding: 10px; font: 600 14px var(--sans);
+  border-radius: 4px; border: 0; background: var(--accent); color: #fff;
+  cursor: pointer; transition: filter .12s;
+}
+button:hover:not(:disabled) { filter: brightness(1.1); }
+button:active:not(:disabled) { filter: brightness(.95); }
+button:disabled { opacity: .45; cursor: default; }
+button.mini { width: auto; margin: 0; padding: 7px 13px; font-size: 13px; flex: 0 0 auto; }
+button.mini-on, button.mini-danger { background: var(--bad); }
+button.btn-on { border-color: var(--accent); color: var(--text); background: var(--accent-dim); }
+.cell-json { margin: 0; padding: 6px 8px; background: var(--bg-inset);
+  border: 1px solid var(--border-soft); border-radius: 4px;
+  font: 11px/1.5 var(--mono); max-height: 220px; overflow: auto; }
+
+/* type-aware command rows (Commands tab) */
+.cmd-row { padding: 8px 0; border-bottom: 1px solid var(--border-soft); }
+.cmd-line { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.cmd-btn { min-width: 120px; text-align: center; font-family: var(--mono) !important; }
+.cmd-arg { width: auto; flex: 1 1 120px; min-width: 90px; }
+.cmd-preview { font: 11px var(--mono); color: var(--text-faint); margin: 5px 0 0 2px;
+  word-break: break-all; }
+.cmd-row pre { margin-top: 6px; }
+.tpl-group { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin-bottom: 5px; }
+.tpl-type { font: 600 10px var(--mono); text-transform: uppercase; color: var(--text-faint);
+  min-width: 52px; }
+/* prefix breadcrumb */
+.crumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 3px; margin-bottom: 6px; }
+.crumb { font: 12px var(--mono); color: var(--accent); cursor: pointer; padding: 1px 3px; border-radius: 3px; }
+.crumb:hover { background: var(--accent-dim); }
+.crumb-sep { color: var(--text-faint); }
+.crumb-load { margin-left: auto !important; padding: 3px 10px !important; }
+.kcount { margin-left: auto; color: var(--text-faint); font: 11px var(--mono); }
+.open-mini { font: 10px var(--mono); color: var(--text-faint); border: 1px solid var(--border);
+  border-radius: 3px; padding: 1px 6px; }
+.open-mini:hover { color: var(--text); border-color: var(--accent); }
+
+/* outline buttons that sit inline with a field (save / delete next to inputs) */
+button.btn-field {
+  width: auto; margin: 0; flex: 0 0 auto; min-width: 76px; padding: 7px 14px;
+  font: 600 12px var(--sans); background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+/* a field row keeps its input(s) and inline buttons on one baseline */
+.field-row { align-items: center; }
+.field-row .grow { flex: 1 1 auto; width: auto; min-width: 0; }
+.field-row-gap { margin-top: 8px; }
+/* connection rows: label+input columns, all bottom-aligned with the ping button */
+.conn-row { display: flex; gap: 8px; align-items: flex-end; margin-top: 6px; }
+.conn-row .grow { flex: 1 1 auto; min-width: 0; }
+.conn-row label { margin-top: 0; }
+.conn-sm { flex: 0 0 auto; width: 72px; }
+.conn-row > button { margin: 0; flex: 0 0 auto; }
+button.btn-field:hover:not(:disabled) {
+  background: var(--bg-elev); color: var(--text); border-color: var(--accent); filter: none;
+}
+button.btn-danger:hover:not(:disabled) {
+  color: var(--bad); border-color: var(--bad); background: var(--bad-bg);
+}
+
+/* ── chips ───────────────────────────────────────────────────────────────── */
+.chips { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip {
+  font: 11px var(--mono); padding: 4px 9px; border-radius: 4px;
+  background: var(--bg-inset); border: 1px solid var(--border);
+  color: var(--text-dim); cursor: pointer; user-select: none; transition: all .12s;
+}
+.chip:hover { border-color: var(--accent); color: var(--text); }
+.chip-active { background: var(--accent-dim); border-color: var(--accent); color: var(--text); }
+.chip-x { font-style: normal; opacity: .5; }
+.chip-x:hover { color: var(--bad); opacity: 1; }
+.chip-del { opacity: .7; }
+.chip-del:hover { background: var(--bad-bg); }
+
+/* ── output blocks ───────────────────────────────────────────────────────── */
+pre {
+  white-space: pre-wrap; word-break: break-all; background: var(--bg-inset);
+  padding: 13px; border-radius: 4px; border: 1px solid var(--border-soft);
+  font: 12px/1.55 var(--mono); color: var(--text); margin: 0;
+}
+.status {
+  font: 600 12px var(--mono); padding: 9px 12px; border-radius: 4px;
+  margin-bottom: 10px; border: 1px solid transparent;
+}
+.ok  { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+.bad { background: var(--bad-bg); color: var(--bad); border-color: var(--bad); }
+
+/* ── JWT strip ───────────────────────────────────────────────────────────── */
+.jwt { font: 11px var(--mono); margin-top: 5px; padding: 8px 10px; border-radius: 4px;
+  background: var(--bg-inset); color: var(--text); border: 1px solid var(--border-soft); }
+.jwt-bad { border-color: var(--bad); }
+.jwt-ok { color: var(--ok); font-weight: 600; }
+.jwt-exp { color: var(--bad); font-weight: 600; }
+.jwt-table { width: 100%; border-collapse: collapse; }
+.jwt-table td { padding: 1px 0; vertical-align: top; word-break: break-all; }
+.jwt-k { color: var(--text-faint); padding-right: 10px !important; white-space: nowrap; }
+.jwt-divider td { border-top: 1px solid var(--border-soft); padding: 0 0 8px !important; }
+
+/* ── field hints / template ──────────────────────────────────────────────── */
+.fields {
+  font: 11px/1.7 var(--mono); background: var(--bg-inset); border: 1px solid var(--border-soft);
+  border-radius: 4px; padding: 8px 11px; margin-bottom: 5px; max-height: 140px; overflow-y: auto;
+}
+.fcomment { color: var(--text-faint); }
+
+/* ── tabs (response/history) ─────────────────────────────────────────────── */
+.tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.tab { font: 600 13px var(--sans); padding: 7px 14px; border-radius: 4px;
+  cursor: pointer; color: var(--text-dim); }
+.tab:hover { background: var(--border-soft); }
+.tab.active { color: var(--text); background: var(--bg-elev); }
+
+/* ── history ─────────────────────────────────────────────────────────────── */
+.history { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.hist-item { width: 100%; border: 1px solid var(--border); border-left: 3px solid;
+  border-radius: 4px; padding: 9px 11px; cursor: pointer; transition: background .12s; }
+.hist-item:hover { background: var(--bg-elev); }
+.hist-ok { border-left-color: var(--ok); }
+.hist-bad { border-left-color: var(--bad); }
+.hist-head { display: flex; justify-content: space-between; font: 12px var(--mono); }
+.hist-head span { color: var(--text-faint); }
+.pin { font-style: normal; cursor: pointer; color: var(--text-faint); opacity: .4; }
+.pin:hover { opacity: 1; color: var(--accent); }
+.pin-on { opacity: 1; color: var(--warn); }
+.hist-body { font: 11px/1.4 var(--mono); color: var(--text-dim); margin-top: 5px;
+  white-space: pre-wrap; max-height: 60px; overflow: hidden; }
+
+/* ── toast ───────────────────────────────────────────────────────────────── */
+.toast { margin-top: 10px; text-align: center; font: 600 12px var(--sans); color: var(--ok); }
+
+/* ── sections (redis/pulsar right column) ───────────────────────────────── */
+.section { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
+
+/* ── redis key browser ───────────────────────────────────────────────────── */
+.keylist { margin-top: 10px; display: flex; flex-direction: column; gap: 2px;
+  overflow-y: auto; max-height: 320px; }
+.keyrow { display: flex; align-items: center; gap: 8px; padding: 5px 7px;
+  border-radius: 4px; cursor: pointer; font: 12px var(--mono); transition: background .1s; }
+.keyrow:hover { background: var(--bg-elev); }
+.keyrow-active { background: var(--accent-dim); }
+.kname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tbadge { font: 600 10px var(--mono); padding: 2px 7px; border-radius: 4px; flex: 0 0 auto;
+  text-transform: uppercase; letter-spacing: .3px; }
+
+/* ── redis value table ───────────────────────────────────────────────────── */
+.rtable { width: 100%; border-collapse: collapse; font: 12px var(--mono); margin-top: 4px; }
+.rtable th { text-align: left; color: var(--text-faint); font-weight: 600; padding: 4px 7px;
+  border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg);
+  z-index: 1; }
+.rtable td { padding: 4px 7px; border-top: 1px solid var(--border-soft); word-break: break-all; }
+.rtable tr:hover td { background: var(--bg-elev); }
+.del-x { cursor: pointer; color: var(--text-faint); }
+.del-x:hover { color: var(--bad); }
+.addrow { margin-top: 10px; }
+
+/* ── live feed (redis pub/sub + pulsar consume) ──────────────────────────── */
+.feed { margin-top: 10px; display: flex; flex-direction: column; gap: 6px;
+  max-height: 62vh; overflow-y: auto; }
+.feed-item { border: 1px solid var(--border); border-left: 3px solid var(--ok);
+  border-radius: 4px; padding: 7px 11px; background: var(--panel); }
+.feed-ch { font: 600 11px var(--mono); color: var(--accent); }
+.feed-time { float: right; font: 11px var(--mono); color: var(--text-faint); }
+.feed-props { font: 10px var(--mono); color: var(--text-faint); margin-top: 3px; }
+.feed-msg { font: 11px/1.45 var(--mono); margin-top: 5px; white-space: pre-wrap; word-break: break-all; }
+
+/* ── scrollbars ──────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: content-box; }
+
+/* ── responsive ──────────────────────────────────────────────────────────── */
+/* medium: narrow the shared left column so the right side keeps room */
+@media (max-width: 1200px) {
+  .layout { grid-template-columns: minmax(320px, 44%) 1fr; }
+}
+/* narrow / mobile: stack left over right, whole panel scrolls */
+@media (max-width: 820px) {
+  .layout { grid-template-columns: 1fr; height: auto; }
+  .left { border-right: none; border-bottom: 1px solid var(--border); }
+  .left, .right { overflow: visible; }
+  .panel { overflow-y: auto; }
+  .topbar { overflow-x: auto; }
+  /* grpc-wrap is a fixed-height flex column; let it grow so stacked content
+     scrolls via .panel instead of being clipped */
+  .grpc-wrap { height: auto; }
+  .grpc-wrap > .layout { height: auto; }
+  /* master-detail (Diag/Utils): nav becomes a horizontal scroll bar on top */
+  .navlay { grid-template-columns: 1fr; max-width: none; margin: 0; border: 0;
+    border-radius: 0; height: auto; max-height: none; }
+  .navlist { flex-direction: row; overflow-x: auto; border-right: 0;
+    border-bottom: 1px solid var(--border); }
+  .navitem { flex: 0 0 auto; white-space: nowrap; }
+}
+/* very narrow: let the top tab bar scroll instead of squashing */
+@media (max-width: 520px) {
+  .layout { grid-template-columns: 1fr; }
+  .conn-sm { width: 60px; }
+}
+
+.feed-head { display: flex; align-items: center; gap: 8px; margin: 10px 0 4px; }
+.feed-head .count { flex: 0 0 auto; }
+.feed-head .chip { margin-left: auto; }
+
+.reset-all { margin-left: auto; font-size: 12px; opacity: .5; }
+.reset-all:hover { color: var(--bad); opacity: 1; background: transparent; }
+
+/* ── gRPC request tabs (Chrome-style) ────────────────────────────────────── */
+.grpc-wrap { display: flex; flex-direction: column; height: 100%; }
+.grpc-wrap > .layout { flex: 1 1 auto; min-height: 0; height: auto; }
+.req-tabs {
+  display: flex; align-items: center; gap: 4px; padding: 6px 12px 0;
+  border-bottom: 1px solid var(--border); background: var(--bg-elev);
+  overflow-x: auto; flex: 0 0 auto;
+}
+.req-tab {
+  font: 500 12px var(--mono); padding: 6px 12px; cursor: pointer;
+  color: var(--text-dim); border: 1px solid transparent; border-bottom: none;
+  border-radius: 4px 4px 0 0; white-space: nowrap; user-select: none;
+}
+.req-tab:hover { color: var(--text); background: var(--border-soft); }
+.req-tab.active {
+  color: var(--text); background: var(--bg); border-color: var(--border);
+  position: relative; top: 1px;
+}
+.req-tab-add { font-size: 14px; padding: 6px 10px; }
+
+/* ── info cards (Redis INFO dashboard) ───────────────────────────────────── */
+.info-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 8px; margin-bottom: 14px; }
+.info-card { background: var(--bg-inset); border: 1px solid var(--border-soft);
+  border-radius: 4px; padding: 10px 12px; }
+.info-card-v { font: 600 16px var(--mono); color: var(--text); word-break: break-all; }
+.info-card-k { font: 11px var(--sans); color: var(--text-faint); margin-top: 2px; }
+
+/* ── JSON tree (HTTP response viewer) ────────────────────────────────────── */
+.jtree { font: 12px/1.5 var(--mono); background: var(--bg-inset);
+  border: 1px solid var(--border-soft); border-radius: 4px; padding: 8px 10px;
+  overflow: auto; }
+.jrow { cursor: pointer; white-space: pre-wrap; word-break: break-all; }
+.jrow:hover { background: var(--bg-elev); }
+.jchildren { padding-left: 16px; border-left: 1px solid var(--border-soft); }
+.jtoggle { display: inline-block; width: 12px; color: var(--text-faint); }
+.jkey { color: var(--accent); }
+.jmeta { color: var(--text-faint); }
+.jbrace { color: var(--text-faint); }
+.jcopy { font-style: normal; opacity: .4; }
+.jcopy:hover { opacity: 1; color: var(--accent); }
+.jv-string { color: var(--ok); }
+.jv-number { color: var(--orange); }
+.jv-boolean { color: var(--purple); }
+.jv-null { color: var(--text-faint); }
+.kv { margin-bottom: 4px; }
+
+/* ── WebSocket message directions ────────────────────────────────────────── */
+.feed-item.ws-in { border-left-color: var(--ok); }
+.feed-item.ws-out { border-left-color: var(--accent); }
+.feed-item.ws-sys { border-left-color: var(--text-faint); }
+.ws-out .feed-ch { color: var(--accent); }
+.ws-sys .feed-ch { color: var(--text-faint); }
+
+/* ── gRPC reflection block ───────────────────────────────────────────────── */
+button.btn-accent { width: auto; margin: 0; padding: 8px 16px; font: 600 13px var(--sans);
+  border: 0; border-radius: 4px; background: var(--accent); color: #fff; flex: 0 0 auto; }
+.refl-box { margin-top: 10px; padding: 12px 14px; border: 1px solid var(--accent);
+  border-radius: 8px; background: var(--accent-dim); }
+.refl-box > label:first-of-type { margin-top: 0; }
+.refl-head { display: flex; align-items: center; gap: 8px; }
+.refl-head .badge { background: var(--accent); color: #fff; }
+
+/* ── Utils / Diag cards ──────────────────────────────────────────────────── */
+/* master-detail as a centered, framed "window" so the surrounding space reads
+   as intentional margin (not an empty void). Height follows content. */
+.navlay { display: grid; grid-template-columns: 200px 1fr;
+  max-width: 1120px; margin: 24px auto; max-height: calc(100% - 48px);
+  border: 1px solid var(--border); border-radius: 10px; overflow: hidden;
+  background: var(--bg-elev); box-shadow: 0 1px 3px #0000001f; }
+.navlist { border-right: 1px solid var(--border); padding: 12px 8px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px; background: var(--bg); }
+.navitem { padding: 8px 12px; border-radius: 6px; cursor: pointer; letter-spacing: .2px;
+  font: 500 13px var(--sans); color: var(--text-dim); transition: background .1s, color .1s; }
+.navitem:hover { background: var(--bg-elev); color: var(--text); }
+.navitem.active { background: var(--accent); color: #fff; }
+.navcontent { padding: 22px 26px 26px; overflow-y: auto; }
+.util-title { font: 600 14px var(--sans); color: var(--text); letter-spacing: .2px;
+  padding-bottom: 10px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+.util-out { position: relative; margin-top: 4px; }
+.util-out pre { margin: 0; background: var(--bg); border: 1px solid var(--border-soft);
+  border-radius: 4px; padding: 8px 10px; padding-right: 52px; white-space: pre-wrap;
+  word-break: break-all; font: 11px/1.5 var(--mono); min-height: 18px; }
+.util-out .chip { position: absolute; top: 6px; right: 6px; }
+
+/* ── Cell-expand modal (DB panel) ────────────────────────────────────────── */
+.modal { position: fixed; inset: 0; background: #0009; display: flex;
+  align-items: center; justify-content: center; z-index: 50; }
+.modal-box { background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 8px; padding: 14px; width: min(720px, 88vw); box-shadow: 0 12px 40px #0007; }
+.modal-box .feed-head { margin-top: 0; }
+.modal-box pre { margin-top: 8px; }
