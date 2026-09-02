@@ -215,15 +215,3 @@ src/
 
 Add a protocol = one `server/<x>.ts` route module + one `<X>Panel.tsx`, mounted
 in `server/index.ts` and `App.tsx`.
-
-## Non-goals (considered, deliberately not built)
-
-- **Env-var `{{var}}` templating** — named connections already cover URLs, and
-  tokens rotate too fast to be worth storing/substituting.
-- **Theme switcher / global hotkeys** — cosmetic; the app already follows the OS
-  light/dark preference.
-- **A2/B differential ("call two targets, diff responses")** — open two tabs
-  instead.
-- **Language-specific panels (e.g. a "Rust panel")** — conduit works at the
-  protocol layer, so a Rust/tonic service is debugged through the gRPC panel like
-  any other backend.
