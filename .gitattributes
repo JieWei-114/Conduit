@@ -1,0 +1,6 @@
+src/** linguist-vendored
+*.ts linguist-detectable=false
+*.tsx linguist-detectable=false
+*.css linguist-detectable=false
+*.html linguist-detectable=false
+pnpm-lock.yaml linguist-generated=true
