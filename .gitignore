@@ -3,12 +3,7 @@ node_modules/
 
 # build output
 dist/
-dist-electron/
 release/
-
-# the vendored protoc binary is large & platform-specific — fetch it per-platform
-# (see README); keep it out of git
-vendor/protoc/
 
 # misc
 .DS_Store
@@ -16,3 +11,7 @@ vendor/protoc/
 
 # UI settings store (local data, not for git)
 conduit-data.json
+
+# tauri
+src-tauri/target/
+src-tauri/gen/

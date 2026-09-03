@@ -1,0 +1,64 @@
+[package]
+name = "conduit-tauri"
+version = "1.1.0"
+edition = "2021"
+rust-version = "1.77"
+default-run = "conduit-app"
+
+[lib]
+name = "conduit_tauri"
+path = "src/lib.rs"
+
+[[bin]]
+name = "serve"
+path = "src/bin/serve.rs"
+required-features = ["devserve"]
+
+[[bin]]
+name = "conduit-app"
+path = "src/main.rs"
+required-features = ["app"]
+
+[dependencies]
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hickory-resolver = "0.24"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
+x509-parser = "0.16"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "stream"] }
+base64 = "0.22"
+futures-util = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+once_cell = "1"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+url = "2"
+uuid = "1"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
+mysql_async = "0.34"
+mongodb = "3"
+redis = { version = "0.27", features = ["tokio-comp"] }
+rdkafka = { version = "0.36", features = ["cmake-build"] }
+tauri = { version = "2", optional = true , features = [] }
+pulsar = { version = "6.9.0", default-features = false, features = ["tokio-runtime", "auth-oauth2"] }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+bytes = "1"
+http = "1"
+tonic-reflection = "0.12"
+prost = "0.13"
+prost-reflect = { version = "0.14", features = ["serde"] }
+prost-types = "0.13"
+async-stream = "0.3.6"
+protobuf = "3"
+protobuf-parse = "3"
+
+[build-dependencies]
+tauri-build = { version = "2", optional = true , features = [] }
+
+[features]
+app = ["dep:tauri", "dep:tauri-build"]
+devserve = []

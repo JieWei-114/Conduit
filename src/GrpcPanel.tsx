@@ -861,7 +861,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
       <div className="layout">
       <div className="left">
         <h3>
-          gRPC <span className="badge">{reflecting ? 'reflection' : 'protoc-powered'}</span>
+          gRPC <span className="badge">{reflecting ? 'reflection' : 'proto files'}</span>
         </h3>
 
         {reflecting && (

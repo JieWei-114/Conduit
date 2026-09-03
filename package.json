@@ -1,85 +1,26 @@
 {
   "name": "conduit",
   "version": "1.1.0",
-  "description": "Local multi-protocol backend debug console (gRPC-Web / Redis / Pulsar)",
+  "description": "Local multi-protocol backend debug console (Tauri + Rust)",
   "author": "conduit",
   "private": true,
   "type": "module",
-  "main": "dist-electron/main.cjs",
   "scripts": {
-    "dev": "concurrently -n server,web -c blue,green \"tsx watch server/index.ts\" \"vite\"",
+    "dev": "tauri dev --features app",
     "build": "vite build",
-    "start": "npm run build && tsx server/index.ts",
-    "electron:build": "vite build && node scripts/build-electron.mjs",
-    "electron:dev": "npm run electron:build && electron .",
-    "fetch:protoc": "node scripts/fetch-protoc.mjs",
-    "predist": "node scripts/fetch-protoc.mjs",
-    "dist": "npm run electron:build && electron-builder --mac --publish never"
+    "bundle": "tauri build --features app",
+    "tauri": "tauri"
   },
   "dependencies": {
-    "@grpc/grpc-js": "^1.14.4",
-    "@hono/node-server": "^1.13.7",
-    "grpc-reflection-js": "^0.3.0",
-    "hono": "^4.6.14",
-    "ioredis": "^5.4.2",
-    "kafkajs": "^2.2.4",
-    "mongodb": "^7.6.0",
-    "mysql2": "^3.24.2",
-    "pg": "^8.23.0",
-    "protobufjs": "^8.8.0",
-    "pulsar-client": "^1.15.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "ws": "^8.21.3"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.1",
-    "@types/node": "^20.17.9",
-    "@types/pg": "^8.23.1",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.0",
-    "electron": "^33.2.1",
-    "electron-builder": "^25.1.8",
-    "esbuild": "^0.24.0",
-    "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "pulsar-client",
-      "esbuild",
-      "electron"
-    ]
-  },
-  "build": {
-    "appId": "my.conduit",
-    "productName": "conduit",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist-electron/**",
-      "dist/**",
-      "node_modules/**"
-    ],
-    "asarUnpack": [
-      "dist/**",
-      "node_modules/pulsar-client/**"
-    ],
-    "extraResources": [
-      {
-        "from": "vendor/protoc",
-        "to": "protoc"
-      }
-    ],
-    "mac": {
-      "target": "dmg",
-      "category": "public.app-category.developer-tools",
-      "identity": null
-    }
   }
 }

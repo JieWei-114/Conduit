@@ -13,23 +13,37 @@ Postman for the things Postman is awkward at.
 | **DB** | PostgreSQL / MySQL / MongoDB / ClickHouse — SQL (or JSON for Mongo), schema browser, query history, CSV/JSON export. |
 | **Redis** | Prefix drill-down browser, type-aware value editor, batch command runner, PUBLISH/SUBSCRIBE live feed, INFO dashboard, key export. |
 | **WS/SSE** | Connect to a WebSocket (custom headers/subprotocols via proxy) or consume a Server-Sent-Events stream. Each tab is an independent live connection. |
-| **Pulsar** | Produce/consume over native `pulsar-client` plus admin API (topics, stats, subscriptions, peek). |
-| **Kafka** | Produce (key/headers/value) and consume (kafkajs, SASL/SSL), with topic listing. |
+| **Pulsar** | Produce/consume over the broker plus admin API (topics, stats, subscriptions, peek). |
+| **Kafka** | Produce (key/headers/value) and consume (rdkafka, SASL/SSL), with topic listing. |
 | **Webhook** | Turns conduit into a receiver: point any caller at your capture URL and watch inbound requests stream in live, with a configurable canned response. |
 | **Diag** | Connectivity diagnostics: TCP port check, TLS certificate expiry, DNS lookup, and a health board that polls a list of URLs. |
 | **Utils** | Offline codec scratchpad: base64 · hex · URL · JSON format/minify · Unix timestamp ↔ date · cron explainer · UUID. |
 
 ## Quick start
 
+Conduit is a Tauri app: a Rust backend (all protocol clients built in) behind a
+React UI, in one native window. Rust stable and Node ≥ 18 with pnpm are required.
+
 ```bash
-pnpm install     # first run also builds the native pulsar-client binary
-pnpm start       # build UI + serve at http://127.0.0.1:7788
-pnpm dev         # hot reload — UI at http://localhost:5188, API proxied to :7788
+pnpm install     # JS deps for the UI
+pnpm dev         # hot-reload dev — Tauri window + Vite UI, Rust API on :7788
 ```
 
 Environment overrides: `PORT` (default `7788`), `CONDUIT_HOST` (default
 `127.0.0.1`), `PROTO_ROOT` (gRPC proto root, defaults to cwd). The server binds
 loopback and handles SIGTERM/SIGINT for a graceful shutdown.
+
+### Sandbox
+
+`sandbox/docker-compose.yml` spins up throwaway services to exercise every
+data-plane panel: PostgreSQL / MySQL / MongoDB / ClickHouse (DB), Redis,
+Kafka, Pulsar, and a reflection-enabled gRPC server (gRPC + reflect). The
+offline panels (HTTP / WS-SSE / Webhook / Diag / Utils) need nothing.
+
+```bash
+docker compose -f sandbox/docker-compose.yml up -d   # start
+docker compose -f sandbox/docker-compose.yml down    # stop
+```
 
 ## Security model
 
@@ -154,44 +168,46 @@ timestamp ↔ date · cron explainer · UUID v4.
 ## Desktop app
 
 ```bash
-pnpm dist        # → release/conduit-<version>-arm64.dmg
+pnpm bundle      # tauri build → src-tauri/target/release/bundle/{macos,dmg}
 ```
 
-Bundles the server (esbuild → CommonJS), the UI (Vite), the Electron runtime, the
-native `pulsar-client` (rebuilt for Electron's ABI), and a platform-matched
-`protoc` (auto-downloaded to `vendor/protoc` by `predist`) into a `.app` wrapped
-in a `.dmg`. Bump `version` in `package.json` first, and drop a `build/icon.icns`
-to set the app icon.
+Compiles the Rust backend + UI into a single native binary and wraps it in a
+`.app` / `.dmg` — no Node runtime, no external `protoc` (proto handling is pure
+Rust). Bump `version` in `package.json` + `src-tauri/tauri.conf.json` first; the
+app icon comes from `src-tauri/icons/` (regenerate with `pnpm tauri icon <png>`).
 
 **Install:** open the `.dmg`, drag `conduit` to Applications. It is unsigned, so
-the first launch needs **right-click → Open** once. Bundled protoc means
-colleagues need nothing installed. Builds target Apple Silicon (arm64); use
-`--x64` / `--win` for Intel/Windows. Each user points the gRPC proto root at
-their own checkout (or uses reflection). Ship the `.dmg` via a GitHub Release for
+the first launch needs **right-click → Open** once. Builds target the host arch
+(Apple Silicon by default). Each user points the gRPC proto root at their own
+checkout (or uses reflection). Ship the `.dmg` via a GitHub Release for
 non-developers.
 
 ## Architecture
 
+Rust backend (axum) in `src-tauri/src/server/`, one module per protocol, all
+mounted under `/api/*` and served on loopback by the Tauri shell:
+
 ```
-server/
-  index.ts        Hono app — loopback bind, global error handler, graceful shutdown, serves dist/
-  grpc.ts         /api/grpc/*         protoc encode/decode; gateway (gRPC-Web) or direct (grpc-js)
-  grpc-reflect.ts /api/grpc/reflect*  server reflection → protobufjs dynamic encode/decode
-  http.ts         /api/http/*         server-side fetch proxy (no CORS)
-  db.ts           /api/db/*           pg / mysql2 / mongodb / clickhouse (HTTP) query runner
-  kafka.ts        /api/kafka/*        kafkajs produce/consume (SSE) + topics
-  redis.ts        /api/redis/*        ioredis: browse, batch cmds, pub/sub, INFO
-  pulsar.ts       /api/pulsar/*       pulsar-client produce/consume + admin API
-  ws.ts           /api/ws/proxy       WebSocket proxy (header/subprotocol passthrough)
-  sse.ts          /api/sse/proxy      Server-Sent-Events passthrough proxy
-  webhook.ts      /api/webhook/*      inbound request capture + SSE feed
-  diag.ts         /api/diag/*         TCP / TLS / DNS / HTTP-ping (Node net/tls/dns)
-  store.ts        /api/store          file-backed settings store (conduit-data.json)
+src-tauri/src/
+  main.rs                 Tauri shell — spawns the axum server, opens the window
+  server/mod.rs           router — nests every /api/* module, dual-stack loopback bind
+  server/grpc.rs          /api/grpc/*         pure-Rust proto encode/decode; gateway (gRPC-Web) or direct (tonic)
+  server/grpc_reflect.rs  /api/grpc/reflect*  server reflection → prost-reflect dynamic encode/decode
+  server/http.rs          /api/http/*         server-side reqwest proxy (no CORS)
+  server/db.rs            /api/db/*           tokio-postgres / mysql_async / mongodb / clickhouse (HTTP)
+  server/kafka.rs         /api/kafka/*        rdkafka produce/consume (SSE) + topics
+  server/redis.rs         /api/redis/*        redis-rs: browse, batch cmds, pub/sub, INFO
+  server/pulsar.rs        /api/pulsar/*       pulsar-rs produce/consume + admin API
+  server/ws.rs            /api/ws/proxy       WebSocket proxy (header/subprotocol passthrough)
+  server/sse.rs           /api/sse/proxy      Server-Sent-Events passthrough proxy
+  server/webhook.rs       /api/webhook/*      inbound request capture + SSE feed
+  server/diag.rs          /api/diag/*         TCP / TLS / DNS / HTTP-ping
+  server/store.rs         /api/store          file-backed settings store (conduit-data.json)
 src/
-  App.tsx         tab shell (panels stay mounted across switches)
-  <X>Panel.tsx    one panel per protocol; AuthBox + JsonTree shared
-  types.ts        shared request/response types (front + back)
+  App.tsx                 tab shell (panels stay mounted across switches)
+  <X>Panel.tsx            one panel per protocol; AuthBox + JsonTree shared
+  types.ts                shared request/response types
 ```
 
-Adding a protocol = one `server/<x>.ts` route module + one `<X>Panel.tsx`,
-mounted in `server/index.ts` and `App.tsx`.
+Adding a protocol = one `src-tauri/src/server/<x>.rs` route module + one
+`<X>Panel.tsx`, mounted in `server/mod.rs` and `App.tsx`.

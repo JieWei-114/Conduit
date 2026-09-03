@@ -265,7 +265,7 @@ export default function KafkaPanel() {
       <div className="layout">
         <div className="left">
           <h3>
-            Kafka <span className="badge">kafkajs</span>
+            Kafka <span className="badge">rdkafka</span>
           </h3>
 
           <label>Saved connections (shared across tabs)</label>

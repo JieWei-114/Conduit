@@ -449,7 +449,7 @@ export default function PulsarPanel() {
       <div className="layout">
         <div className="left">
           <h3>
-            Pulsar <span className="badge">pulsar-client</span>
+            Pulsar <span className="badge">pulsar-rs</span>
           </h3>
 
           <label>Saved connections (shared across all tabs)</label>

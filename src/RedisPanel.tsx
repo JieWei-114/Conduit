@@ -331,7 +331,7 @@ export default function RedisPanel() {
       {/* ── left: connection + scan + key list (shared by Value & Commands) ── */}
       <div className="left">
         <h3>
-          Redis <span className="badge">ioredis</span>
+          Redis <span className="badge">redis-rs</span>
         </h3>
 
         <label>Saved connections</label>
