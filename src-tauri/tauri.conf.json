@@ -7,7 +7,7 @@
     "beforeDevCommand": "pnpm exec vite --port 5188",
     "devUrl": "http://localhost:5188",
     "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../dist"
+    "frontendDist": "http://localhost:7788"
   },
   "app": {
     "windows": [

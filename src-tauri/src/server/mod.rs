@@ -7,6 +7,7 @@ pub mod kafka;
 pub mod pulsar;
 pub mod redis;
 pub mod sse;
+pub mod static_files;
 pub mod store;
 pub mod webhook;
 pub mod ws;
@@ -29,6 +30,7 @@ pub fn app() -> Router {
         .nest("/api/store", store::routes())
         .nest("/api/webhook", webhook::routes())
         .nest("/api/ws", ws::routes())
+        .fallback(static_files::handler)
 }
 
 pub async fn serve(port: u16) -> std::io::Result<()> {

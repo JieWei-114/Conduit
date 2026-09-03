@@ -28,6 +28,22 @@ fn main() {
                     }
                 });
             });
+
+            // The window loads http://localhost:PORT, so wait for the server to
+            // accept before the webview navigates (avoids a connection-refused
+            // splash on cold start).
+            let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+            for _ in 0..100 {
+                if std::net::TcpStream::connect_timeout(
+                    &addr,
+                    std::time::Duration::from_millis(100),
+                )
+                .is_ok()
+                {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
             Ok(())
         })
         .run(tauri::generate_context!())

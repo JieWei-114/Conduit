@@ -204,10 +204,13 @@ fn parse_file(
         return;
     }
     visited.push(file_rel.to_string());
-    let src_str = match std::fs::read_to_string(root.join(file_rel)) {
+    let raw = match std::fs::read_to_string(root.join(file_rel)) {
         Ok(s) => s,
         Err(_) => return,
     };
+    // Strip comments first so a `service` / `message` word inside a comment
+    // can't be mistaken for a real declaration.
+    let src_str = strip_comments(&raw);
     let src: Vec<char> = src_str.chars().collect();
 
     if is_entry {
@@ -254,6 +257,56 @@ fn parse_imports(src: &str) -> Vec<String> {
                 }
             }
         }
+    }
+    out
+}
+
+fn strip_comments(s: &str) -> String {
+    let b: Vec<char> = s.chars().collect();
+    let n = b.len();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let mut in_str = false;
+    let mut quote = '"';
+    while i < n {
+        let c = b[i];
+        if in_str {
+            out.push(c);
+            if c == '\\' && i + 1 < n {
+                out.push(b[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == quote {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            in_str = true;
+            quote = c;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' && i + 1 < n && b[i + 1] == '/' {
+            while i < n && b[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < n && b[i + 1] == '*' {
+            i += 2;
+            while i + 1 < n && !(b[i] == '*' && b[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            out.push(' ');
+            continue;
+        }
+        out.push(c);
+        i += 1;
     }
     out
 }
