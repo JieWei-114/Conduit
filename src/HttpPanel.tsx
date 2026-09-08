@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
 import JsonTree from './JsonTree';
+import { rowKeyDown, rowTabIndex } from './rowNav';
 
 const LS_FORM = 'conduit.http.form.v2';
 const LS_TABS = 'conduit.http.tabs.v1';
@@ -198,7 +199,7 @@ function KvTable({
   return (
     <div className="kv">
       {display.map((r, i) => (
-        <div key={i} className="row field-row" style={{ marginBottom: 4 }}>
+        <div key={i} className="row field-row mb-1">
           <input placeholder={ph[0]} value={r.key} spellCheck={false} onChange={(e) => edit(i, { key: e.target.value })} />
           <input className="grow" placeholder={ph[1]} value={r.value} spellCheck={false} onChange={(e) => edit(i, { value: e.target.value })} />
         </div>
@@ -384,30 +385,58 @@ export default function HttpPanel() {
     [result?.ok, result?.bodyText],
   );
 
+  /* A response that is not JSON offers only the raw view. `respView` is sticky
+     across responses, so it can name a view the current response does not have;
+     the effective view is what both the tab strip and the body render from, so
+     the highlighted tab always matches what is on screen. */
+  const respViews = parsedResp !== undefined ? (['tree', 'pretty', 'raw'] as const) : (['raw'] as const);
+  const respViewEff = (respViews as readonly string[]).includes(respView) ? respView : 'raw';
+
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs">
+      <div className="req-tabs" role="tablist" aria-label="Request tabs">
         {tabs.map((t) => (
-          <span
+          <button
             key={t.id}
+            type="button"
             className={`req-tab ${t.id === activeId ? 'active' : ''}`}
+            role="tab"
+            aria-selected={t.id === activeId}
             onClick={() => setActiveId(t.id)}
             title={t.form.url || 'new request'}
           >
             {busyMap[t.id] ? '⏳ ' : ''}
             {tabLabel(t)}
             {tabs.length > 1 && (
+              // Lives inside the tab button, so it stays a role="button" span:
+              // a button cannot contain another button.
               <i
                 className="chip-x"
+                role="button"
+                tabIndex={0}
+                aria-label="close tab"
                 title="close tab"
                 onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeTab(t.id);
+                  }
+                }}
               >
                 {' '}✕
               </i>
             )}
-          </span>
+          </button>
         ))}
-        <span className="req-tab req-tab-add" title="new request tab" onClick={addTab}>+</span>
+        <button
+          type="button"
+          className="req-tab req-tab-add"
+          aria-label="new request tab"
+          title="new request tab"
+          onClick={addTab}
+        >+</button>
       </div>
 
     <div className="layout">
@@ -432,9 +461,10 @@ export default function HttpPanel() {
               <option key={s.name} value={s.name}>{s.name}</option>
             ))}
           </select>
-          <button className="btn-field" onClick={saveRequest}>save</button>
+          <button className="btn-field" title="Save the current request under a name" onClick={saveRequest}>save</button>
           <button
             className="btn-field btn-danger"
+            title="Delete the selected saved request"
             disabled={!pickedSaved}
             onClick={() => {
               persistSaved(saved.filter((s) => s.name !== pickedSaved));
@@ -444,14 +474,18 @@ export default function HttpPanel() {
             delete
           </button>
         </div>
-        <div className="chips">
-          <span className="chip" onClick={importCurl}>import cURL</span>
-          <span className="chip" onClick={exportCurl}>copy as cURL</span>
+        <div className="inline mt-2">
+          <button className="btn-secondary" title="Fill this request from a pasted cURL command" onClick={importCurl}>
+            import cURL
+          </button>
+          <button className="btn-secondary" title="Copy this request to the clipboard as a cURL command" onClick={exportCurl}>
+            copy as cURL
+          </button>
         </div>
 
         <label>Request</label>
         <div className="row field-row">
-          <select value={form.method} onChange={(e) => set('method', e.target.value)} style={{ maxWidth: 110 }}>
+          <select className="w-sm" value={form.method} onChange={(e) => set('method', e.target.value)}>
             {METHODS.map((m) => (
               <option key={m}>{m}</option>
             ))}
@@ -466,7 +500,7 @@ export default function HttpPanel() {
           />
         </div>
         {form.query.filter((q) => q.key).length > 0 && (
-          <div className="hint" style={{ wordBreak: 'break-all' }}>→ {fullUrl}</div>
+          <div className="hint break">→ {fullUrl}</div>
         )}
 
         <label>Query params</label>
@@ -476,8 +510,8 @@ export default function HttpPanel() {
 
         <label>Body</label>
         <select
+          className="mb-2"
           value={form.bodyKind}
-          style={{ marginBottom: 8 }}
           onChange={(e) => set('bodyKind', e.target.value as BodyKind)}
         >
           <option value="none">none</option>
@@ -508,7 +542,6 @@ export default function HttpPanel() {
             <input
               type="file"
               multiple
-              style={{ padding: 4 }}
               onChange={async (e) => {
                 const picked = Array.from(e.target.files ?? []);
                 const items: FileItem[] = [];
@@ -529,25 +562,31 @@ export default function HttpPanel() {
               }}
             />
             {form.files.map((f, i) => (
-              <div key={i} className="row field-row" style={{ marginTop: 4 }}>
+              <div key={i} className="row field-row mt-1">
                 <input
+                  className="max-sm"
                   placeholder="field"
                   value={f.field}
-                  style={{ maxWidth: 120 }}
                   onChange={(e) => {
                     const next = [...form.files];
                     next[i] = { ...f, field: e.target.value };
                     set('files', next);
                   }}
                 />
-                <span className="grow hint" style={{ margin: 0, alignSelf: 'center' }}>{f.name}</span>
-                <span className="chip" onClick={() => set('files', form.files.filter((_, j) => j !== i))}>✕</span>
+                <span className="grow faint break">{f.name}</span>
+                <button
+                  className="btn-field btn-danger"
+                  title={`Remove ${f.name}`}
+                  onClick={() => set('files', form.files.filter((_, j) => j !== i))}
+                >
+                  remove
+                </button>
               </div>
             ))}
           </>
         )}
 
-        <label>Extra headers (one per line)</label>
+        <label>Extra headers</label>
         <textarea
           rows={3}
           value={form.headers}
@@ -555,22 +594,45 @@ export default function HttpPanel() {
           placeholder="x-custom: value"
           onChange={(e) => set('headers', e.target.value)}
         />
+        <div className="hint">one per line, as name: value</div>
 
-        <div className="row field-row" style={{ marginTop: 12 }}>
-          <button className="grow" style={{ marginTop: 0 }} disabled={busy} onClick={send}>
-            {busy ? 'Sending…' : 'Send ▶'}
-          </button>
-          <input style={{ width: 100 }} value={form.timeoutMs} title="timeout (ms)" onChange={(e) => set('timeoutMs', e.target.value)} />
+        <label>Timeout</label>
+        <input
+          className="w-sm"
+          value={form.timeoutMs}
+          title="Request timeout in milliseconds"
+          onChange={(e) => set('timeoutMs', e.target.value)}
+        />
+        <div className="hint">milliseconds</div>
+
+        <button disabled={busy} onClick={send}>
+          {busy ? 'Sending…' : 'Send ▶'}
+        </button>
+        <div className="hint">
+          Press <kbd>⌘↵</kbd> / <kbd>Ctrl↵</kbd> to send
         </div>
-        <div className="hint">timeout ms · ⌘/Ctrl+Enter to send</div>
       </div>
 
       <div className="right">
-        <div className="tabs">
-          <span className={tab === 'response' ? 'tab active' : 'tab'} onClick={() => setTab('response')}>Response</span>
-          <span className={tab === 'history' ? 'tab active' : 'tab'} onClick={() => setTab('history')}>
+        <div className="tabs" role="tablist" aria-label="Result view">
+          <button
+            type="button"
+            className={tab === 'response' ? 'tab active' : 'tab'}
+            role="tab"
+            aria-selected={tab === 'response'}
+            onClick={() => setTab('response')}
+          >
+            Response
+          </button>
+          <button
+            type="button"
+            className={tab === 'history' ? 'tab active' : 'tab'}
+            role="tab"
+            aria-selected={tab === 'history'}
+            onClick={() => setTab('history')}
+          >
             History ({hist.length})
-          </span>
+          </button>
         </div>
 
         {tab === 'response' && (
@@ -587,38 +649,67 @@ export default function HttpPanel() {
                 <div className="status bad">FAILED · {result.error}</div>
               ))}
             {result?.ok && (
-              <div className="chips" style={{ marginBottom: 8 }}>
-                {parsedResp !== undefined && (
-                  <>
-                    <span className={`chip ${respView === 'tree' ? 'chip-active' : ''}`} onClick={() => setRespView('tree')}>tree</span>
-                    <span className={`chip ${respView === 'pretty' ? 'chip-active' : ''}`} onClick={() => setRespView('pretty')}>pretty</span>
-                  </>
-                )}
-                <span className={`chip ${respView === 'raw' ? 'chip-active' : ''}`} onClick={() => setRespView('raw')}>raw</span>
-                <span className="chip" onClick={() => navigator.clipboard.writeText(result.bodyText ?? '')}>copy</span>
+              <div className="inline mb-2">
+                {/* One setting with mutually exclusive values, so it is a tab
+                    strip rather than three independent toggles. */}
+                <div className="inline" role="tablist" aria-label="Response view">
+                  {respViews.map((v) => (
+                    <button
+                      type="button"
+                      key={v}
+                      role="tab"
+                      className={`chip ${respViewEff === v ? 'chip-active' : ''}`}
+                      aria-selected={respViewEff === v}
+                      title={`Show the response as ${v}`}
+                      onClick={() => setRespView(v)}
+                    >
+                      {v}
+                    </button>
+                  ))}
+                </div>
                 {result.headers && (
-                  <span className="chip" onClick={() => setShowHeaders((s) => !s)}>
-                    {showHeaders ? 'hide' : 'show'} headers
-                  </span>
+                  <button
+                    type="button"
+                    className={`chip ${showHeaders ? 'chip-active' : ''}`}
+                    aria-pressed={showHeaders}
+                    title="Show or hide the response headers"
+                    onClick={() => setShowHeaders((s) => !s)}
+                  >
+                    headers
+                  </button>
                 )}
+                <button
+                  className="btn-secondary"
+                  title="Copy the response body to the clipboard"
+                  onClick={() => navigator.clipboard.writeText(result.bodyText ?? '')}
+                >
+                  copy
+                </button>
               </div>
             )}
             {result?.ok && showHeaders && result.headers && (
-              <pre style={{ marginBottom: 8 }}>
+              <pre className="mb-2">
                 {Object.entries(result.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
               </pre>
             )}
             {result == null ? (
-              <pre>Send a request to see the response here.</pre>
+              <div className="empty">
+                <div className="empty-icon">▶</div>
+                <div className="empty-title">No response yet</div>
+                <div className="empty-hint">
+                  Enter a URL and press <kbd>⌘↵</kbd> to send your first request.
+                </div>
+              </div>
             ) : !result.ok ? (
               <pre>{result.error}</pre>
             ) : result.binary ? (
               <div>
-                <div className="hint" style={{ marginBottom: 8 }}>
+                <div className="hint mb-2">
                   binary response ({result.contentType || 'unknown type'}, {result.size}B) — not shown as text
                 </div>
                 <button
-                  style={{ width: 'auto', marginTop: 0 }}
+                  className="btn-secondary"
+                  title="Save the binary response to a file"
                   onClick={() => {
                     const bin = atob(result.bodyBase64 ?? '');
                     const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
@@ -633,9 +724,9 @@ export default function HttpPanel() {
                   download
                 </button>
               </div>
-            ) : parsedResp !== undefined && respView === 'tree' ? (
+            ) : parsedResp !== undefined && respViewEff === 'tree' ? (
               <JsonTree data={parsedResp} />
-            ) : parsedResp !== undefined && respView === 'pretty' ? (
+            ) : parsedResp !== undefined && respViewEff === 'pretty' ? (
               <pre>{JSON.stringify(parsedResp, null, 2)}</pre>
             ) : (
               <pre>{result.bodyText || '(empty body)'}</pre>
@@ -643,15 +734,27 @@ export default function HttpPanel() {
           </>
         )}
 
-        {tab === 'history' && (
+        {tab === 'history' && hist.length === 0 && (
+          <div className="empty">
+            <div className="empty-icon">🕘</div>
+            <div className="empty-title">No requests yet</div>
+            <div className="empty-hint">
+              Every request you send lands here. Send one with <kbd>⌘↵</kbd>, then click an entry to restore it.
+            </div>
+          </div>
+        )}
+
+        {tab === 'history' && hist.length > 0 && (
           <div className="history">
-            {hist.length === 0 && <pre>No requests yet.</pre>}
             {hist.map((h, i) => (
               <div
                 key={i}
                 className={`hist-item ${h.ok ? 'hist-ok' : 'hist-bad'}`}
+                role="button"
+                tabIndex={rowTabIndex(i)}
                 onClick={() => restore(h)}
-                title="Click to restore this request and review its response"
+                onKeyDown={rowKeyDown(() => restore(h))}
+                title="Restore this request and review its response"
               >
                 <div className="hist-head">
                   <b>{h.form.method} {h.form.url.replace(/^https?:\/\//, '').slice(0, 55)}</b>
@@ -662,11 +765,13 @@ export default function HttpPanel() {
                 </div>
               </div>
             ))}
-            {hist.length > 0 && (
-              <span className="chip" onClick={() => { setHist([]); localStorage.removeItem(LS_HISTORY); }}>
-                clear history
-              </span>
-            )}
+            <button
+              className="btn-secondary btn-danger mt-2"
+              title="Delete every entry in the request history"
+              onClick={() => { setHist([]); localStorage.removeItem(LS_HISTORY); }}
+            >
+              clear history
+            </button>
           </div>
         )}
       </div>

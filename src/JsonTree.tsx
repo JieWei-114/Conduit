@@ -15,11 +15,12 @@ function Node({ k, v, path, depth }: { k: string | null; v: unknown; path: strin
   const [open, setOpen] = useState(depth < 2); // auto-expand first couple levels
   const keyLabel = k === null ? '' : `${k}: `;
 
-  const copyPath = (e: React.MouseEvent) => {
+  const copyPath = (e: React.MouseEvent | React.KeyboardEvent) => {
     e.stopPropagation();
     if (path) navigator.clipboard.writeText(path);
   };
 
+  // Leaf rows are not tab stops: a response can hold thousands of them.
   if (!isObj) {
     return (
       <div className="jrow" onClick={copyPath} title={path ? `copy path: ${path}` : ''}>
@@ -38,7 +39,19 @@ function Node({ k, v, path, depth }: { k: string | null; v: unknown; path: strin
 
   return (
     <div>
-      <div className="jrow" onClick={() => setOpen((o) => !o)}>
+      <div
+        className="jrow"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setOpen((o) => !o);
+          }
+        }}
+      >
         <span className="jtoggle">{open ? '▾' : '▸'}</span>
         <span className="jkey">{keyLabel}</span>
         <span className="jmeta">
@@ -46,7 +59,9 @@ function Node({ k, v, path, depth }: { k: string | null; v: unknown; path: strin
           {open ? '' : `… ${entries.length}`}
           {open ? '' : brace[1]}
           {path && (
-            <i className="jcopy" title={`copy path: ${path}`} onClick={copyPath}> ⧉</i>
+            <button type="button" className="jcopy" title={`copy path: ${path}`} onClick={copyPath}>
+              {' ⧉'}
+            </button>
           )}
         </span>
       </div>

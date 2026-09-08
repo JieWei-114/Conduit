@@ -166,13 +166,13 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
         while let Some(msg) = cl_rx.next().await {
             match msg {
                 Ok(Message::Text(t)) => {
-                    if up_tx.send(TMessage::Text(t.into())).await.is_err() {
+                    if up_tx.send(TMessage::Text(t)).await.is_err() {
                         break;
                     }
                 }
                 Ok(Message::Binary(b)) => {
                     let s = String::from_utf8_lossy(&b).to_string();
-                    if up_tx.send(TMessage::Text(s.into())).await.is_err() {
+                    if up_tx.send(TMessage::Text(s)).await.is_err() {
                         break;
                     }
                 }

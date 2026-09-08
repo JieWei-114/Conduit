@@ -100,56 +100,64 @@ export default function WebhookPanel() {
           Webhook <span className="badge">inbound capture</span>
         </h3>
 
-        <label>Your capture URL — point any caller here</label>
+        <label>Capture URL</label>
         <div className="row field-row">
           <input className="grow" readOnly value={captureUrl} spellCheck={false} onFocus={(e) => e.target.select()} />
-          <button className="btn-field" onClick={() => navigator.clipboard.writeText(captureUrl)}>copy</button>
+          <button className="btn-field" title="Copy the capture URL to the clipboard" onClick={() => navigator.clipboard.writeText(captureUrl)}>Copy</button>
         </div>
         <div className="hint">
-          Any method, any sub-path (e.g. <code>{captureUrl}payment/callback</code>) is captured. Use your LAN IP
-          instead of localhost if the caller is another machine.
+          Point any caller here. Any method, any sub-path (e.g. <code>{captureUrl}payment/callback</code>) is
+          captured. Use your LAN IP instead of localhost if the caller is another machine.
         </div>
 
-        <div className="row field-row" style={{ marginTop: 12 }}>
-          <button className={`btn-field ${live ? 'btn-danger' : ''}`} onClick={connect}>
-            {live ? 'stop listening' : 'start listening'}
+        <div className="row field-row field-row-gap">
+          <button className={`btn-field ${live ? 'btn-on' : ''}`} onClick={connect}>
+            {live ? 'Stop listening' : 'Start listening'}
           </button>
-          <div className="hint" style={{ margin: 0 }}>
-            {live ? '🟢 live — new hits stream in' : '⚪ not listening (past hits still load)'}
-          </div>
+          <div className="hint">Past hits load either way; listening streams new ones as they arrive.</div>
         </div>
+        <div className={`${live ? 'status ok' : 'status'} mt-2`}>{live ? 'Listening' : 'Not listening'}</div>
 
-        <label style={{ marginTop: 16 }}>Response returned to the caller</label>
+        <label>Canned response</label>
         <div className="row field-row">
-          <div style={{ flex: '0 0 90px' }}>
-            <input value={resp.status} placeholder="200" onChange={(e) => setResp((r) => ({ ...r, status: e.target.value }))} />
+          <div className="w-xs">
+            <input value={resp.status} placeholder="200" title="HTTP status code returned to the caller" onChange={(e) => setResp((r) => ({ ...r, status: e.target.value }))} />
           </div>
-          <input className="grow" value={resp.contentType} spellCheck={false} placeholder="application/json" onChange={(e) => setResp((r) => ({ ...r, contentType: e.target.value }))} />
+          <input className="grow" value={resp.contentType} spellCheck={false} placeholder="application/json" title="Content-Type returned to the caller" onChange={(e) => setResp((r) => ({ ...r, contentType: e.target.value }))} />
         </div>
-        <textarea rows={3} style={{ marginTop: 8 }} value={resp.body} spellCheck={false} placeholder='{"ok":true}' onChange={(e) => setResp((r) => ({ ...r, body: e.target.value }))} />
-        <div className="row field-row" style={{ marginTop: 10 }}>
-          <button style={{ width: 'auto', marginTop: 0 }} onClick={saveResp}>save response</button>
-          {savedMsg && <span className="hint" style={{ margin: 0 }}>{savedMsg}</span>}
-        </div>
+        <textarea className="mt-2" rows={3} value={resp.body} spellCheck={false} placeholder='{"ok":true}' onChange={(e) => setResp((r) => ({ ...r, body: e.target.value }))} />
+        <div className="hint">Every captured request gets this status, content type and body back.</div>
+        <button onClick={saveResp}>Save response</button>
+        {savedMsg && <div className="toast">{savedMsg}</div>}
       </div>
 
       <div className="right">
         {hits.length > 0 && (
-          <div className="feed-head">
+          <div className="feed-head inline">
             <span className="count">{fq ? `${shown.length} / ${hits.length}` : hits.length} hits</span>
             <input
               className="grow"
-              style={{ margin: '0 8px', padding: '2px 6px', fontSize: 12 }}
               placeholder="filter path / method / body / headers"
               value={filter}
               spellCheck={false}
               onChange={(e) => setFilter(e.target.value)}
             />
-            <span className="chip" onClick={clearAll}>clear</span>
+            <button className="btn-field btn-danger" title="Discard every captured request" onClick={clearAll}>Clear</button>
           </div>
         )}
-        {hits.length === 0 && (
-          <pre>No requests captured yet. Click “start listening”, then send a request to your capture URL.</pre>
+        {hits.length === 0 && !live && (
+          <div className="empty">
+            <div className="empty-icon">◈</div>
+            <div className="empty-title">Not listening</div>
+            <div className="empty-hint">Press <kbd>Start listening</kbd> on the left, then send a request to your capture URL.</div>
+          </div>
+        )}
+        {hits.length === 0 && live && (
+          <div className="empty">
+            <div className="empty-icon">◈</div>
+            <div className="empty-title">Listening, no hits yet</div>
+            <div className="empty-hint">Send a request to your capture URL and it will appear here with its headers and body.</div>
+          </div>
         )}
         <div className="feed">
           {shown.map((h) => {
@@ -159,23 +167,29 @@ export default function WebhookPanel() {
               <div key={h.id} className="feed-item">
                 <span className="feed-ch">
                   <b>{h.method}</b> {h.path}
-                  <span className="chip" style={{ marginLeft: 8 }} onClick={() => setExpanded(open ? null : h.id)}>
-                    {open ? 'hide' : 'headers'}
-                  </span>
-                  {h.body && (
-                    <span className="chip" style={{ marginLeft: 6 }} onClick={() => navigator.clipboard.writeText(h.body)}>
-                      copy body
-                    </span>
-                  )}
                 </span>
                 <span className="feed-time">{new Date(h.at).toLocaleTimeString()}</span>
-                {Object.keys(h.query).length > 0 && <div className="feed-props">query {JSON.stringify(h.query)}</div>}
+                {Object.keys(h.query).length > 0 && <div className="feed-props break">query {JSON.stringify(h.query)}</div>}
                 {open && (
-                  <div className="feed-props" style={{ whiteSpace: 'pre-wrap' }}>
+                  <div className="feed-msg faint">
                     {Object.entries(h.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
                   </div>
                 )}
-                {h.body && <div className="feed-msg">{pretty ?? h.body}</div>}
+                {h.body && <div className="feed-msg break">{pretty ?? h.body}</div>}
+                <div className="inline mt-1">
+                  <button
+                    className={`btn-ghost ${open ? 'btn-on' : ''}`}
+                    title={open ? 'Hide the request headers' : 'Show the request headers'}
+                    onClick={() => setExpanded(open ? null : h.id)}
+                  >
+                    {open ? 'Hide headers' : 'Headers'}
+                  </button>
+                  {h.body && (
+                    <button className="btn-field" title="Copy this request body to the clipboard" onClick={() => navigator.clipboard.writeText(h.body)}>
+                      Copy body
+                    </button>
+                  )}
+                </div>
               </div>
             );
           })}

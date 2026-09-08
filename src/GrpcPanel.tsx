@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
+import { rowKeyDown, rowTabIndex } from './rowNav';
 import type {
   CallRequest,
   CallResult,
@@ -829,33 +830,54 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
   return (
     <div className="grpc-wrap">
       {/* Chrome-style request tabs — each holds an independent request */}
-      <div className="req-tabs">
+      <div className="req-tabs" role="tablist" aria-label="Request tabs">
         {reqTabs.map((t) => (
-          <span
+          <button
+            type="button"
             key={t.id}
             className={`req-tab ${t.id === activeId ? 'active' : ''}`}
+            role="tab"
+            aria-selected={t.id === activeId}
             onClick={() => setActiveId(t.id)}
             title={t.form.rpc || 'new request'}
           >
             {busyMap[t.id] ? '⏳ ' : ''}
             {tabLabel(t)}
             {reqTabs.length > 1 && (
+              // Lives inside the tab button, so it stays a role="button" span:
+              // a button cannot contain another button.
               <i
                 className="chip-x"
+                role="button"
+                tabIndex={0}
+                aria-label="close tab"
                 title="close tab"
                 onClick={(e) => {
                   e.stopPropagation();
                   closeTab(t.id);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeTab(t.id);
+                  }
+                }}
               >
                 {' '}✕
               </i>
             )}
-          </span>
+          </button>
         ))}
-        <span className="req-tab req-tab-add" title="new request tab (clones this one)" onClick={addTab}>
+        <button
+          type="button"
+          className="req-tab req-tab-add"
+          aria-label="new request tab (clones this one)"
+          title="new request tab (clones this one)"
+          onClick={addTab}
+        >
           +
-        </span>
+        </button>
       </div>
 
       <div className="layout">
@@ -865,20 +887,21 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
         </h3>
 
         {reflecting && (
-          <div className="hint" style={{ marginTop: 6 }}>
-            ⚡ driven by server reflection — proto selection hidden ·{' '}
-            <span className="chip" onClick={clearReflect}>use .proto instead</span>
+          <div className="inline mt-2">
+            <span className="hint">driven by server reflection — proto selection hidden</span>
+            <button className="btn-ghost" onClick={clearReflect}>use .proto instead</button>
           </div>
         )}
 
         {!reflecting && (
           <>
-            <label>Proto repo path (.proto files)</label>
+            <label>Proto repo</label>
             <input
               value={form.root}
               spellCheck={false}
               onChange={(e) => set('root', e.target.value)}
             />
+            <div className="hint">directory scanned for .proto files</div>
             {rootError && <div className="error">{rootError}</div>}
 
             <label>
@@ -968,10 +991,9 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                 <label>Port</label>
                 <input value={form.targetPort} onChange={(e) => set('targetPort', e.target.value)} />
               </div>
-              <label style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto', paddingBottom: 8 }}>
+              <label className="inline">
                 <input
                   type="checkbox"
-                  style={{ width: 'auto' }}
                   checked={form.plaintext}
                   onChange={(e) => set('plaintext', e.target.checked)}
                 />
@@ -985,29 +1007,33 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
             {/* reflection — list services/methods off the server, no .proto needed */}
             {!(reflSvcs && reflSvcs.length > 0) && (
-              <div className="row field-row" style={{ marginTop: 10 }}>
-                <button className="btn-accent" style={{ width: 'auto', marginTop: 0 }} disabled={reflBusy} onClick={runReflect}>
-                  {reflBusy ? 'reflecting…' : '⚡ Reflect services'}
+              <div className="row field-row mt-3">
+                <button className="btn-secondary" disabled={reflBusy} onClick={runReflect}>
+                  {reflBusy ? 'reflecting…' : 'Reflect services'}
                 </button>
-                <div className="hint" style={{ margin: 0 }}>
+                <div className="hint grow">
                   list services from the server, no .proto — needs reflection enabled
                 </div>
               </div>
             )}
-            {reflErr && <div className="hint error" style={{ marginTop: 4 }}>🔴 {reflErr}</div>}
+            {reflErr && <div className="hint error mt-1">{reflErr}</div>}
             {reflSvcs && reflSvcs.length === 0 && (
-              <div className="hint" style={{ marginTop: 4 }}>
-                no user services exposed via reflection · <span className="chip" onClick={clearReflect}>back</span>
+              <div className="inline mt-1">
+                <span className="hint">no user services exposed via reflection</span>
+                <button className="btn-ghost" onClick={clearReflect}>back</button>
               </div>
             )}
             {reflSvcs && reflSvcs.length > 0 && (
               <div className="refl-box">
-                <div className="refl-head">
-                  <span className="badge">⚡ reflection</span>
-                  <span className="chip" onClick={runReflect}>{reflBusy ? '…' : 're-fetch'}</span>
-                  <span className="chip" onClick={clearReflect}>clear</span>
+                <div className="refl-head inline">
+                  <span className="badge">reflection</span>
+                  <span className="spacer" />
+                  <button className="btn-field" disabled={reflBusy} onClick={runReflect}>
+                    {reflBusy ? '…' : 're-fetch'}
+                  </button>
+                  <button className="btn-field" onClick={clearReflect}>clear</button>
                 </div>
-                <label style={{ marginTop: 8 }}>Service</label>
+                <label>Service</label>
                 <select
                   value={reflSvcSel}
                   onChange={(e) => { setReflSvcSel(e.target.value); setReflMethodSel(''); }}
@@ -1034,17 +1060,19 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                   const streaming = m.requestStream || m.responseStream;
                   return (
                     <>
-                      <div className="hint" style={{ marginTop: 8 }}>
+                      <div className="hint mt-2 break">
                         {m.requestType} → {m.responseType} · template loaded into the request body below
                       </div>
-                      <button
-                        style={{ marginTop: 10 }}
-                        disabled={busy || streaming}
-                        onClick={sendReflect}
-                        title={streaming ? 'streaming RPCs are not supported here' : ''}
-                      >
-                        {busy ? 'Sending…' : streaming ? 'streaming — not supported' : 'Send (reflection) ▶'}
-                      </button>
+                      <div className="inline mt-3">
+                        <button
+                          className="btn-accent"
+                          disabled={busy || streaming}
+                          onClick={sendReflect}
+                          title={streaming ? 'streaming RPCs are not supported here' : ''}
+                        >
+                          {busy ? 'Invoking…' : streaming ? 'streaming — not supported' : 'Invoke ▶'}
+                        </button>
+                      </div>
                     </>
                   );
                 })()}
@@ -1096,10 +1124,11 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           </button>
         </div>
 
-        <label>Route prefix (gateway path before the gRPC path)</label>
+        <label>Route prefix</label>
+        <div className="hint mb-1">gateway path inserted before the gRPC path</div>
         <div className="row field-row">
           <select
-            style={{ maxWidth: 160, flex: '0 0 auto' }}
+            className="max-md"
             value={savedPrefixes.includes(form.prefix) ? form.prefix : ''}
             onChange={(e) => {
               if (e.target.value) {
@@ -1133,14 +1162,16 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           </button>
         </div>
 
-        <label>Full URL (auto — edit to override)</label>
+        <label>Full URL</label>
         <input value={url} onChange={(e) => set('urlOverride', e.target.value)} />
+        <div className="hint">built from base + prefix + gRPC path · edit to override</div>
         </>
         )}
 
         <AuthBox value={form.auth} onChange={(a) => set('auth', a)} />
 
-        <label>Extra headers (one per line)</label>
+        <label>Extra headers</label>
+        <div className="hint mb-1">one <span className="mono">name: value</span> pair per line</div>
         <textarea
           rows={5}
           value={form.extraHeaders}
@@ -1150,23 +1181,30 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
         />
         <div className="chips">
           {Object.entries(QUICK_HEADERS).map(([k, v]) => (
-            <span key={k} className="chip" onClick={() => addQuickHeader(v)}>
+            <button
+              type="button"
+              key={k}
+              className="chip"
+              title={`Add the ${k} header`}
+              onClick={() => addQuickHeader(v)}
+            >
               + {k}
-            </span>
+            </button>
           ))}
         </div>
 
-        <label>
+        <label>Request body</label>
+        <div className="hint mb-1">
           {form.transport === 'direct' && reflMethodSel
-            ? 'Request body — JSON (reflection)'
-            : 'Request body — proto text format (not JSON)'}
-        </label>
+            ? 'JSON — reflection encodes it from the server descriptor'
+            : 'proto text format, not JSON'}
+        </div>
         {reqFields.length > 0 && (
           <div className="fields">
             {reqFields.map((f) => {
               const evs = enumValues(f.type);
               return (
-                <div key={f.name}>
+                <div key={f.name} className="break">
                   <b>{f.name}</b>: {f.repeated ? 'repeated ' : ''}{f.type}
                   {evs && <span className="fcomment"> {'{ ' + evs.join(' | ') + ' }'}</span>}
                   {f.comment && <span className="fcomment"> — {f.comment}</span>}
@@ -1189,47 +1227,60 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           }}
         />
         <div className="chips">
-          <span className="chip" onClick={generateTemplate}>generate template</span>
-          <span className="chip" onClick={copyCurl}>copy as cURL</span>
-          <span className="chip" onClick={copyShareLink}>copy share link</span>
+          {([
+            ['generate template', generateTemplate],
+            ['copy as cURL', copyCurl],
+            ['copy share link', copyShareLink],
+          ] as const).map(([label, act]) => (
+            <button
+              type="button"
+              key={label}
+              className="chip"
+              onClick={act}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
-        <div className="row field-row" style={{ marginTop: 12 }}>
-          <button
-            style={{ marginTop: 0 }}
-            disabled={busy || !current}
-            onClick={send}
-            className="grow"
-          >
-            {busy ? 'Sending…' : 'Send ▶'}
-          </button>
-          <div style={{ flex: '0 0 auto' }}>
-            <input
-              style={{ width: 110 }}
-              value={timeout}
-              title="request timeout (ms)"
-              onChange={(e) => setTimeoutMs(e.target.value)}
-            />
-          </div>
+        <label>Timeout</label>
+        <input
+          className="w-sm"
+          value={timeout}
+          title="request timeout in milliseconds"
+          onChange={(e) => setTimeoutMs(e.target.value)}
+        />
+        <div className="hint">milliseconds</div>
+
+        <button disabled={busy || !current} onClick={send}>
+          {busy ? 'Invoking…' : 'Invoke ▶'}
+        </button>
+        <div className="hint">
+          <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> from the request body also invokes
         </div>
-        <div className="hint">timeout ms · ⌘/Ctrl+Enter to send</div>
         {toast && <div className="toast">{toast}</div>}
       </div>
 
       <div className="right">
-        <div className="tabs">
-          <span
+        <div className="tabs" role="tablist" aria-label="Result view">
+          <button
+            type="button"
             className={tab === 'response' ? 'tab active' : 'tab'}
+            role="tab"
+            aria-selected={tab === 'response'}
             onClick={() => setTab('response')}
           >
             Response
-          </span>
-          <span
+          </button>
+          <button
+            type="button"
             className={tab === 'history' ? 'tab active' : 'tab'}
+            role="tab"
+            aria-selected={tab === 'history'}
             onClick={() => setTab('history')}
           >
             History ({histEntries.length})
-          </span>
+          </button>
         </div>
 
         {tab === 'response' && (
@@ -1251,18 +1302,29 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
               ))}
 
             {result?.ok && (
-              <div className="chips" style={{ marginBottom: 8 }}>
-                <span className="chip" onClick={copyResponse}>copy response</span>
+              <div className="chips mb-2">
+                <button
+                  type="button"
+                  className="chip"
+                  onClick={copyResponse}
+                >
+                  copy response
+                </button>
                 {(result.headers || result.trailers) && (
-                  <span className="chip" onClick={() => setShowHeaders((s) => !s)}>
+                  <button
+                    type="button"
+                    className="chip"
+                    aria-pressed={showHeaders}
+                    onClick={() => setShowHeaders((s) => !s)}
+                  >
                     {showHeaders ? 'hide' : 'show'} headers / trailers
-                  </span>
+                  </button>
                 )}
               </div>
             )}
 
             {result?.ok && showHeaders && (
-              <pre style={{ marginBottom: 8 }}>
+              <pre className="mb-2">
                 {'── request headers (sent by conduit) ──\n' +
                   Object.entries(result.reqHeaders ?? {})
                     .map(([k, v]) => `${k}: ${v}`)
@@ -1280,13 +1342,17 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
               </pre>
             )}
 
-            <pre>
-              {result == null
-                ? 'Send a request to see the decoded response here.'
-                : result.ok
-                  ? result.decoded || '(empty response body)'
-                  : result.error}
-            </pre>
+            {result == null ? (
+              <div className="empty">
+                <div className="empty-icon">▶</div>
+                <div className="empty-title">No response yet</div>
+                <div className="empty-hint">
+                  Pick a service and method, fill the request body, then press <kbd>Invoke</kbd>.
+                </div>
+              </div>
+            ) : (
+              <pre>{result.ok ? result.decoded || '(empty response body)' : result.error}</pre>
+            )}
           </>
         )}
 
@@ -1294,39 +1360,50 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           <div className="history">
             {pins.length > 0 && (
               <>
-                <div className="hint" style={{ marginBottom: 2 }}>★ pinned</div>
+                <div className="hint mb-1">★ pinned</div>
                 {pins.map((h, i) => (
                   <HistItem
                     key={'pin' + i}
                     h={h}
+                    index={i}
                     pinned
                     onRestore={() => restoreHistory(h)}
                     onPin={() => togglePin(h)}
                   />
                 ))}
-                <div className="hint" style={{ margin: '6px 0 2px' }}>recent</div>
+                <div className="hint mt-2 mb-1">recent</div>
               </>
             )}
-            {histEntries.length === 0 && pins.length === 0 && <pre>No requests yet.</pre>}
+            {histEntries.length === 0 && pins.length === 0 && (
+              <div className="empty">
+                <div className="empty-icon">🕘</div>
+                <div className="empty-title">No requests yet</div>
+                <div className="empty-hint">
+                  Every <kbd>Invoke</kbd> is recorded here — click an entry to restore it into the
+                  form.
+                </div>
+              </div>
+            )}
             {histEntries.map((h, i) => (
               <HistItem
                 key={i}
                 h={h}
+                index={i}
                 pinned={isPinned(h)}
                 onRestore={() => restoreHistory(h)}
                 onPin={() => togglePin(h)}
               />
             ))}
             {histEntries.length > 0 && (
-              <span
-                className="chip"
+              <button
+                className="btn-secondary btn-danger"
                 onClick={() => {
                   setHistEntries([]);
                   localStorage.removeItem(LS_HISTORY);
                 }}
               >
                 clear history
-              </span>
+              </button>
             )}
           </div>
         )}
@@ -1338,11 +1415,13 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
 function HistItem({
   h,
+  index,
   pinned,
   onRestore,
   onPin,
 }: {
   h: HistoryEntry;
+  index: number;
   pinned: boolean;
   onRestore: () => void;
   onPin: () => void;
@@ -1350,14 +1429,20 @@ function HistItem({
   return (
     <div
       className={`hist-item ${h.ok ? 'hist-ok' : 'hist-bad'}`}
+      role="button"
+      tabIndex={rowTabIndex(index)}
       onClick={onRestore}
-      title="Click to restore this request into the form"
+      onKeyDown={rowKeyDown(onRestore)}
+      title="Restore this request into the form"
     >
       <div className="hist-head">
-        <b>{h.rpc}</b>
+        <b className="break">{h.rpc}</b>
         <span>
-          <i
+          <button
+            type="button"
             className={`pin ${pinned ? 'pin-on' : ''}`}
+            aria-pressed={pinned}
+            aria-label={pinned ? 'unpin' : 'pin'}
             title={pinned ? 'unpin' : 'pin'}
             onClick={(e) => {
               e.stopPropagation();
@@ -1365,7 +1450,7 @@ function HistItem({
             }}
           >
             ★
-          </i>{' '}
+          </button>{' '}
           {h.grpcStatus === '0' ? 'OK' : h.grpcStatus}
           {h.durationMs != null ? ` · ${h.durationMs}ms` : ''} ·{' '}
           {new Date(h.at).toLocaleTimeString()}

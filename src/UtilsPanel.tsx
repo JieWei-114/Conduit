@@ -70,23 +70,36 @@ function safe(fn: () => string, input: string, showErr = false): string {
 
 function CopyOut({ value }: { value: string }) {
   if (!value) return null;
+  const copy = () => navigator.clipboard.writeText(value);
   return (
     <div className="util-out">
       <pre>{value}</pre>
-      <span className="chip" onClick={() => navigator.clipboard.writeText(value)}>copy</span>
+      <button type="button" className="chip" onClick={copy}>
+        copy
+      </button>
+    </div>
+  );
+}
+
+function Empty({ icon, title, hint }: { icon: string; title: string; hint: string }) {
+  return (
+    <div className="empty mt-3">
+      <div className="empty-icon">{icon}</div>
+      <div className="empty-title">{title}</div>
+      <div className="empty-hint">{hint}</div>
     </div>
   );
 }
 
 type Tool = 'base64' | 'hex' | 'url' | 'json' | 'time' | 'cron' | 'uuid';
-const NAV: { id: Tool; label: string }[] = [
-  { id: 'base64', label: 'Base64' },
-  { id: 'hex', label: 'Hex' },
-  { id: 'url', label: 'URL encode' },
-  { id: 'json', label: 'JSON format' },
-  { id: 'time', label: 'Timestamp' },
-  { id: 'cron', label: 'Cron explainer' },
-  { id: 'uuid', label: 'UUID v4' },
+const NAV: { id: Tool; label: string; desc: string }[] = [
+  { id: 'base64', label: 'Base64', desc: 'Encode text to Base64 and decode Base64 back to text, UTF-8 safe.' },
+  { id: 'hex', label: 'Hex', desc: 'Convert text to space-separated hex bytes and back.' },
+  { id: 'url', label: 'URL encode', desc: 'Percent-encode or decode a query string value or path segment.' },
+  { id: 'json', label: 'JSON format', desc: 'Pretty-print JSON with 2-space indent, or minify it to one line.' },
+  { id: 'time', label: 'Timestamp', desc: 'Translate a Unix timestamp into ISO and local time, and back again.' },
+  { id: 'cron', label: 'Cron explainer', desc: 'Read a 5-field cron expression back as plain English.' },
+  { id: 'uuid', label: 'UUID v4', desc: 'Generate throwaway random UUIDs for test data and fixtures.' },
 ];
 
 export default function UtilsPanel() {
@@ -114,91 +127,157 @@ export default function UtilsPanel() {
     return `unix  ${Math.floor(d.getTime() / 1000)} s · ${d.getTime()} ms\nISO   ${d.toISOString()}`;
   })();
 
+  const title = (id: Tool) => {
+    const n = NAV.find((x) => x.id === id)!;
+    return (
+      <div className="util-title">
+        {n.label}
+        <div className="hint">{n.desc}</div>
+      </div>
+    );
+  };
+
   return (
     <div className="navlay">
       <div className="navlist">
         {NAV.map((n) => (
-          <div key={n.id} className={`navitem ${sel === n.id ? 'active' : ''}`} onClick={() => setSel(n.id)}>
+          <button
+            type="button"
+            key={n.id}
+            className={`navitem ${sel === n.id ? 'active' : ''}`}
+            aria-pressed={sel === n.id}
+            onClick={() => setSel(n.id)}
+          >
             {n.label}
-          </div>
+          </button>
         ))}
       </div>
 
       <div className="navcontent">
         {sel === 'base64' && (
           <>
-            <div className="util-title">Base64</div>
+            {title('base64')}
             <textarea rows={3} value={b64in} spellCheck={false} placeholder="text or base64…" onChange={(e) => setB64in(e.target.value)} />
-            <label>encode →</label>
-            <CopyOut value={safe(() => b64utf8(b64in), b64in)} />
-            <label>decode →</label>
-            <CopyOut value={safe(() => unb64utf8(b64in), b64in)} />
+            {b64in.trim() ? (
+              <>
+                <label>Encoded</label>
+                <CopyOut value={safe(() => b64utf8(b64in), b64in)} />
+                <label>Decoded</label>
+                <div className="hint">Blank when the input is not valid Base64.</div>
+                <CopyOut value={safe(() => unb64utf8(b64in), b64in)} />
+              </>
+            ) : (
+              <Empty icon="⇄" title="No conversion yet" hint="Paste text or a Base64 string above. Both directions are computed as you type." />
+            )}
           </>
         )}
 
         {sel === 'hex' && (
           <>
-            <div className="util-title">Hex</div>
+            {title('hex')}
             <textarea rows={3} value={hexin} spellCheck={false} placeholder="text, or: 68 65 6c 6c 6f" onChange={(e) => setHexin(e.target.value)} />
-            <label>text → hex</label>
-            <CopyOut value={safe(() => toHex(hexin), hexin)} />
-            <label>hex → text</label>
-            <CopyOut value={safe(() => fromHex(hexin), hexin, true)} />
+            {hexin.trim() ? (
+              <>
+                <label>Text as hex</label>
+                <CopyOut value={safe(() => toHex(hexin), hexin)} />
+                <label>Hex as text</label>
+                <div className="hint">Accepts spaces, commas and <code className="mono">0x</code> prefixes.</div>
+                <CopyOut value={safe(() => fromHex(hexin), hexin, true)} />
+              </>
+            ) : (
+              <Empty icon="⇄" title="No conversion yet" hint="Type text to see its bytes, or paste hex bytes to read them back as text." />
+            )}
           </>
         )}
 
         {sel === 'url' && (
           <>
-            <div className="util-title">URL encode / decode</div>
+            {title('url')}
             <textarea rows={3} value={urlin} spellCheck={false} placeholder="value with spaces & symbols…" onChange={(e) => setUrlin(e.target.value)} />
-            <label>encodeURIComponent →</label>
-            <CopyOut value={safe(() => encodeURIComponent(urlin), urlin)} />
-            <label>decodeURIComponent →</label>
-            <CopyOut value={safe(() => decodeURIComponent(urlin), urlin, true)} />
+            {urlin.trim() ? (
+              <>
+                <label>Encoded</label>
+                <div className="hint">Percent-encoded with <code className="mono">encodeURIComponent</code>, safe for a query value.</div>
+                <CopyOut value={safe(() => encodeURIComponent(urlin), urlin)} />
+                <label>Decoded</label>
+                <CopyOut value={safe(() => decodeURIComponent(urlin), urlin, true)} />
+              </>
+            ) : (
+              <Empty icon="⇄" title="No conversion yet" hint="Paste a raw value or an already-encoded one. Both directions are computed as you type." />
+            )}
           </>
         )}
 
         {sel === 'json' && (
           <>
-            <div className="util-title">JSON format / minify</div>
+            {title('json')}
             <textarea rows={6} value={jsonin} spellCheck={false} placeholder='{"a":1,"b":[2,3]}' onChange={(e) => setJsonin(e.target.value)} />
-            <label>pretty →</label>
-            <CopyOut value={safe(() => JSON.stringify(JSON.parse(jsonin), null, 2), jsonin, true)} />
-            <label>minify →</label>
-            <CopyOut value={safe(() => JSON.stringify(JSON.parse(jsonin)), jsonin, true)} />
+            {jsonin.trim() ? (
+              <>
+                <label>Pretty</label>
+                <CopyOut value={safe(() => JSON.stringify(JSON.parse(jsonin), null, 2), jsonin, true)} />
+                <label>Minified</label>
+                <CopyOut value={safe(() => JSON.stringify(JSON.parse(jsonin)), jsonin, true)} />
+              </>
+            ) : (
+              <Empty icon="{ }" title="Nothing to format" hint="Paste a JSON object or array above to get an indented and a one-line version." />
+            )}
           </>
         )}
 
         {sel === 'time' && (
           <>
-            <div className="util-title">Unix timestamp ↔ date</div>
+            {title('time')}
+            <label>Timestamp or date</label>
             <input value={ts} spellCheck={false} placeholder="1700000000  ·  or  2026-08-17T10:00:00Z" onChange={(e) => setTs(e.target.value)} />
-            <div className="row field-row" style={{ marginTop: 8 }}>
-              <span className="chip" onClick={() => setTs(String(Math.floor(browserNow() / 1000)))}>now (s)</span>
-              <span className="chip" onClick={() => setTs(String(browserNow()))}>now (ms)</span>
+            <div className="hint">Ten digits are read as seconds, thirteen as milliseconds.</div>
+            <div className="inline mt-2">
+              <button className="btn-field" onClick={() => setTs(String(Math.floor(browserNow() / 1000)))}>now (s)</button>
+              <button className="btn-field" onClick={() => setTs(String(browserNow()))}>now (ms)</button>
             </div>
-            <CopyOut value={tsOut} />
+            {tsOut ? (
+              <div className="mt-3">
+                <CopyOut value={tsOut} />
+              </div>
+            ) : (
+              <Empty icon="⏱" title="No time to show" hint="Enter a Unix timestamp or an ISO date, or press now (s) to start from the current time." />
+            )}
           </>
         )}
 
         {sel === 'cron' && (
           <>
-            <div className="util-title">Cron explainer</div>
-            <div className="hint" style={{ marginTop: 0, marginBottom: 8 }}>standard 5-field: minute hour day-of-month month day-of-week</div>
+            {title('cron')}
+            <label>Expression</label>
             <input value={cron} spellCheck={false} placeholder="*/5 9-17 * * 1-5" onChange={(e) => setCron(e.target.value)} />
-            <CopyOut value={cron.trim() ? describeCron(cron) : ''} />
+            <div className="hint">Five fields, in order: minute, hour, day-of-month, month, day-of-week.</div>
+            {cron.trim() ? (
+              <div className="mt-3">
+                <CopyOut value={describeCron(cron)} />
+              </div>
+            ) : (
+              <Empty icon="⏲" title="Nothing to explain" hint="Enter a 5-field cron expression above to read back the schedule it describes." />
+            )}
           </>
         )}
 
         {sel === 'uuid' && (
           <>
-            <div className="util-title">UUID v4</div>
-            <div className="hint" style={{ marginTop: 0, marginBottom: 8 }}>scratchpad generator — not for cryptographic use</div>
-            <div className="row field-row">
-              <button style={{ width: 'auto' }} onClick={() => setUuids((u) => [uuidv4(), ...u].slice(0, 20))}>generate</button>
-              {uuids.length > 0 && <span className="chip" onClick={() => setUuids([])}>clear</span>}
+            {title('uuid')}
+            <div className="hint mb-2">Uses <code className="mono">Math.random</code>, so these are fine for fixtures but not for anything security-related.</div>
+            <div className="inline">
+              <button className="mini" onClick={() => setUuids((u) => [uuidv4(), ...u].slice(0, 20))}>generate</button>
+              {uuids.length > 0 && (
+                <button className="btn-field btn-danger" onClick={() => setUuids([])}>clear</button>
+              )}
             </div>
-            {uuids.length > 0 && <CopyOut value={uuids.join('\n')} />}
+            {uuids.length > 0 ? (
+              <div className="mt-3">
+                <CopyOut value={uuids.join('\n')} />
+              </div>
+            ) : (
+              <Empty icon="⌗" title="No UUIDs yet" hint="Press generate for a fresh v4 UUID. The last 20 are kept so you can copy them as a block." />
+            )}
           </>
         )}
       </div>

@@ -143,9 +143,10 @@ export default function AuthBox({
         <>
           {a.type === 'oauth2' && (
             <>
-              <label>Token endpoint (issuer URL)</label>
+              <label>Token endpoint</label>
               <input value={a.oauthIssuer} spellCheck={false} placeholder="https://auth.example.com/oauth/token"
                 onChange={(e) => set('oauthIssuer', e.target.value)} />
+              <div className="hint">the issuer URL that exchanges credentials for a token</div>
               <div className="row field-row field-row-gap">
                 <input placeholder="client_id" value={a.oauthClientId} spellCheck={false}
                   onChange={(e) => set('oauthClientId', e.target.value)} />
@@ -155,16 +156,22 @@ export default function AuthBox({
               <div className="row field-row field-row-gap">
                 <input className="grow" placeholder="audience (optional)" value={a.oauthAudience} spellCheck={false}
                   onChange={(e) => set('oauthAudience', e.target.value)} />
-                <button className="btn-field" disabled={!a.oauthIssuer.trim()} onClick={fetchToken}>
+                <button className="btn-field" title="Exchange the client credentials for an access token"
+                  disabled={!a.oauthIssuer.trim()} onClick={fetchToken}>
                   get token
                 </button>
               </div>
               {oauthStatus && <div className="hint">{oauthStatus}</div>}
             </>
           )}
-          <label>{a.type === 'oauth2' ? 'Token (filled by "get token" — or paste one)' : 'Token ("Bearer " added automatically)'}</label>
+          <label>Token</label>
           <textarea rows={5} value={a.bearer} placeholder="eyJhbGciOi..." spellCheck={false}
             onChange={(e) => set('bearer', e.target.value)} />
+          <div className="hint">
+            {a.type === 'oauth2'
+              ? 'filled in by "get token", or paste one here'
+              : 'the "Bearer " prefix is added automatically'}
+          </div>
         </>
       )}
 
@@ -184,9 +191,10 @@ export default function AuthBox({
 
       {a.type === 'raw' && (
         <>
-          <label>Full Authorization header value (any scheme)</label>
+          <label>Authorization value</label>
           <input value={a.raw} spellCheck={false} placeholder="Token abc123  ·  Bearer xyz  ·  custom-scheme …"
             onChange={(e) => set('raw', e.target.value)} />
+          <div className="hint">sent verbatim as the whole header value, any scheme</div>
         </>
       )}
 
@@ -210,9 +218,6 @@ export default function AuthBox({
                   <td>{String(jwt.header.kid)}</td>
                 </tr>
               )}
-              <tr aria-hidden="true">
-                <td colSpan={2} style={{ height: 8 }} />
-              </tr>
               <tr className="jwt-divider">
                 <td colSpan={2} />
               </tr>

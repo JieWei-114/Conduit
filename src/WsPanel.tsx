@@ -224,6 +224,17 @@ export default function WsPanel() {
   const fq = filter.trim().toLowerCase();
   const shown = fq ? msgs.filter((m) => m.text.toLowerCase().includes(fq)) : msgs;
 
+  // one wording for connection state across every streaming panel
+  const connText =
+    connState === 'live'
+      ? 'Connected'
+      : connState === 'connecting'
+        ? 'Connecting…'
+        : connState === 'error'
+          ? `Error — ${st.msg}`
+          : `Disconnected${st.msg ? ` · ${st.msg}` : ''}`;
+  const connCls = connState === 'live' ? 'status ok' : connState === 'error' ? 'status bad' : 'status';
+
   const switchMode = (mode: 'ws' | 'sse') => {
     if (!editable) disconnect(active.id);
     set('mode', mode);
@@ -231,35 +242,73 @@ export default function WsPanel() {
 
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs">
+      <div className="req-tabs" role="tablist" aria-label="Connections">
         {tabs.map((t) => {
           const s = stateMap[t.id]?.s;
           return (
-            <span key={t.id} className={`req-tab ${t.id === activeId ? 'active' : ''}`} onClick={() => setActiveId(t.id)} title={t.form.url}>
+            <button
+              type="button"
+              key={t.id}
+              className={`req-tab ${t.id === activeId ? 'active' : ''}`}
+              role="tab"
+              aria-selected={t.id === activeId}
+              onClick={() => setActiveId(t.id)}
+              title={t.form.url}
+            >
               {s === 'live' ? '🟢 ' : s === 'connecting' ? '🟡 ' : s === 'error' ? '🔴 ' : ''}
               {tabLabel(t)}
               {tabs.length > 1 && (
-                <i className="chip-x" title="close tab" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}> ✕</i>
+                // Lives inside the tab button, so it stays a role="button" span:
+                // a button cannot contain another button.
+                <i
+                  className="chip-x"
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Close this tab"
+                  title="Close this tab"
+                  onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      closeTab(t.id);
+                    }
+                  }}
+                > ✕</i>
               )}
-            </span>
+            </button>
           );
         })}
-        <span className="req-tab req-tab-add" title="new connection tab" onClick={addTab}>+</span>
+        <button
+          type="button"
+          className="req-tab req-tab-add"
+          aria-label="New tab"
+          title="New tab"
+          onClick={addTab}
+        >+</button>
       </div>
 
       <div className="layout">
         <div className="left">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
-            <h3 style={{ margin: 0 }}>
-              {sse ? 'SSE' : 'WebSocket'} <span className="badge">live stream</span>
-            </h3>
-            <div className="tabs" style={{ margin: 0 }}>
-              <span className={form.mode === 'ws' ? 'tab active' : 'tab'} onClick={() => switchMode('ws')}>WebSocket</span>
-              <span className={form.mode === 'sse' ? 'tab active' : 'tab'} onClick={() => switchMode('sse')}>SSE</span>
-            </div>
+          <h3>
+            {sse ? 'SSE' : 'WebSocket'} <span className="badge">live stream</span>
+          </h3>
+          <div className="tabs" role="tablist" aria-label="Transport">
+            {(['ws', 'sse'] as const).map((m) => (
+              <button
+                type="button"
+                key={m}
+                className={form.mode === m ? 'tab active' : 'tab'}
+                role="tab"
+                aria-selected={form.mode === m}
+                onClick={() => switchMode(m)}
+              >
+                {m === 'ws' ? 'WebSocket' : 'SSE'}
+              </button>
+            ))}
           </div>
 
-          <label>Saved connections</label>
+          <label>Saved connection</label>
           <div className="row field-row">
             <select
               className="grow"
@@ -285,14 +334,14 @@ export default function WsPanel() {
                 setPicked(name);
               }}
             >
-              save
+              Save
             </button>
             <button className="btn-field btn-danger" disabled={!picked} onClick={() => { persistSaved(saved.filter((s) => s.name !== picked)); setPicked(''); }}>
-              delete
+              Delete
             </button>
           </div>
 
-          <label>URL ({sse ? 'http:// or https://' : 'ws:// or wss://'})</label>
+          <label>URL</label>
           <div className="row field-row">
             <input
               className="grow"
@@ -303,82 +352,96 @@ export default function WsPanel() {
               onChange={(e) => set('url', e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && connect(active.id)}
             />
-            <button className={`btn-field ${live || connState === 'connecting' ? 'btn-danger' : ''}`} onClick={() => connect(active.id)}>
-              {live || connState === 'connecting' ? 'disconnect' : 'connect'}
+            <button className={`btn-field ${live || connState === 'connecting' ? 'btn-on' : ''}`} onClick={() => connect(active.id)}>
+              {live || connState === 'connecting' ? 'Disconnect' : 'Connect'}
             </button>
           </div>
+          <div className="hint">{sse ? 'http:// or https://' : 'ws:// or wss://'}</div>
 
-          <label>Headers (one per line — Authorization etc.)</label>
+          <label>Headers</label>
           <textarea rows={4} value={form.headers} spellCheck={false} placeholder="authorization: Bearer …" disabled={!editable} onChange={(e) => set('headers', e.target.value)} />
+          <div className="hint">One <code>k: v</code> per line — Authorization and the like.</div>
 
           {!sse && (
             <>
-              <label>Subprotocols (optional, comma-separated)</label>
+              <label>Subprotocols</label>
               <input value={form.protocols} spellCheck={false} placeholder="graphql-ws" disabled={!editable} onChange={(e) => set('protocols', e.target.value)} />
+              <div className="hint">Optional, comma-separated.</div>
             </>
           )}
 
-          <div className={`hint ${connState === 'error' ? 'error' : ''}`} style={{ marginTop: 8 }}>
-            {connState === 'live'
-              ? '🟢 connected — receiving'
-              : connState === 'connecting'
-                ? '🟡 connecting…'
-                : connState === 'error'
-                  ? `🔴 ${st.msg}`
-                  : `⚪ ${st.msg || 'not connected'}`}
-          </div>
+          <div className={`${connCls} mt-4`}>{connText}</div>
         </div>
 
         <div className="right">
           {sse ? (
-            <div className="hint" style={{ marginTop: 0 }}>
+            <div className="hint">
               SSE is receive-only — connect on the left and events stream below. Only the default
               (unnamed) <code>message</code> events are shown.
             </div>
           ) : (
             <>
-              <label style={{ marginTop: 0 }}>Send a message</label>
+              <label>Send a message</label>
               <textarea
                 rows={4}
                 value={outboxMap[active.id] ?? ''}
                 spellCheck={false}
-                placeholder={live ? '{"type":"subscribe",…}   ·   ⌘/Ctrl+Enter to send' : 'connect first'}
+                placeholder={live ? '{"type":"subscribe",…}' : 'connect first'}
                 disabled={!live}
                 onChange={(e) => setOutboxMap((m) => ({ ...m, [active.id]: e.target.value }))}
                 onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendMsg(active.id); }}
               />
-              <button style={{ width: 'auto' }} disabled={!live} onClick={() => sendMsg(active.id)}>Send ▶</button>
+              <div className="hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> sends.</div>
+              <button disabled={!live} onClick={() => sendMsg(active.id)}>Send</button>
             </>
           )}
 
           <div className="section">
             {msgs.length > 0 && (
-              <div className="feed-head">
+              <div className="feed-head inline">
                 <span className="count">{fq ? `${shown.length} / ${msgs.length}` : msgs.length} messages</span>
                 <input
                   className="grow"
-                  style={{ margin: '0 8px', padding: '2px 6px', fontSize: 12 }}
                   placeholder="filter messages"
                   value={filter}
                   spellCheck={false}
                   onChange={(e) => setFilterMap((m) => ({ ...m, [active.id]: e.target.value }))}
                 />
-                <span className="chip" onClick={() => setMsgsMap((m) => ({ ...m, [active.id]: [] }))}>clear</span>
+                <button className="btn-field btn-danger" title="Discard the messages received so far" onClick={() => setMsgsMap((m) => ({ ...m, [active.id]: [] }))}>Clear</button>
               </div>
             )}
-            <div className="feed">
-              {msgs.length === 0 && <pre>Connect, then messages stream here. Sent messages are echoed too.</pre>}
-              {shown.map((m) => {
-                const pretty = m.dir !== 'sys' ? tryJson(m.text) : null;
-                return (
-                  <div key={m.id} className={`feed-item ws-${m.dir}`}>
-                    <span className="feed-ch">{m.dir === 'in' ? '↓ recv' : m.dir === 'out' ? '↑ sent' : '•'}</span>
-                    <span className="feed-time">{new Date(m.at).toLocaleTimeString()}</span>
-                    <div className="feed-msg">{pretty ?? m.text}</div>
-                  </div>
-                );
-              })}
-            </div>
+            {msgs.length === 0 && connState !== 'live' && (
+              <div className="empty">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Not connected</div>
+                <div className="empty-hint">Enter a URL on the left and press <kbd>Connect</kbd> to stream messages here.</div>
+              </div>
+            )}
+            {msgs.length === 0 && connState === 'live' && (
+              <div className="empty">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Connected, no messages yet</div>
+                <div className="empty-hint">
+                  {sse
+                    ? 'Events pushed by the server will appear here.'
+                    : 'Incoming frames appear here. Send a message above to check the round trip.'}
+                </div>
+              </div>
+            )}
+            {msgs.length > 0 && (
+              <div className="feed">
+                {shown.map((m) => {
+                  const pretty = m.dir !== 'sys' ? tryJson(m.text) : null;
+                  return (
+                    <div key={m.id} className={`feed-item ws-${m.dir}`}>
+                      <span className="feed-ch">{m.dir === 'in' ? '↓ recv' : m.dir === 'out' ? '↑ sent' : '•'}</span>
+                      <span className="feed-time">{new Date(m.at).toLocaleTimeString()}</span>
+                      <div className="feed-msg break">{pretty ?? m.text}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       </div>

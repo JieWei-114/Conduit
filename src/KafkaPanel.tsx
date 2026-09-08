@@ -231,6 +231,17 @@ export default function KafkaPanel() {
 
   const isConsuming = !!consuming[active.id];
   const cs = connMap[active.id]?.s ?? 'idle';
+  // one wording for connection state across every streaming panel
+  const csMsg = connMap[active.id]?.msg;
+  const connText =
+    cs === 'live'
+      ? `Connected${csMsg ? ` · ${csMsg}` : ''}`
+      : cs === 'connecting'
+        ? 'Connecting…'
+        : cs === 'error'
+          ? `Error — ${csMsg}`
+          : 'Disconnected';
+  const connCls = cs === 'live' ? 'status ok' : cs === 'error' ? 'status bad' : 'status';
   const rawFeed = feeds[active.id] ?? [];
   const fq = (feedFilter[active.id] ?? '').trim().toLowerCase();
   const shownFeed = fq
@@ -244,22 +255,47 @@ export default function KafkaPanel() {
 
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs">
+      <div className="req-tabs" role="tablist" aria-label="Kafka tabs">
         {tabs.map((t) => (
-          <span
+          <button
+            type="button"
             key={t.id}
             className={`req-tab ${t.id === activeId ? 'active' : ''}`}
+            role="tab"
+            aria-selected={t.id === activeId}
             onClick={() => setActiveId(t.id)}
             title={t.topic}
           >
             {connMap[t.id]?.s === 'live' ? '🟢 ' : connMap[t.id]?.s === 'connecting' ? '🟡 ' : connMap[t.id]?.s === 'error' ? '🔴 ' : ''}
             {tabLabel(t)}
             {tabs.length > 1 && (
-              <i className="chip-x" title="close tab" onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}> ✕</i>
+              // Lives inside the tab button, so it stays a role="button" span:
+              // a button cannot contain another button.
+              <i
+                className="chip-x"
+                role="button"
+                tabIndex={0}
+                aria-label="Close this tab"
+                title="Close this tab"
+                onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeTab(t.id);
+                  }
+                }}
+              > ✕</i>
             )}
-          </span>
+          </button>
         ))}
-        <span className="req-tab req-tab-add" title="new consumer tab (shares this connection)" onClick={addTab}>+</span>
+        <button
+          type="button"
+          className="req-tab req-tab-add"
+          aria-label="New tab (shares this connection)"
+          title="New tab (shares this connection)"
+          onClick={addTab}
+        >+</button>
       </div>
 
       <div className="layout">
@@ -268,7 +304,7 @@ export default function KafkaPanel() {
             Kafka <span className="badge">rdkafka</span>
           </h3>
 
-          <label>Saved connections (shared across tabs)</label>
+          <label>Saved connection</label>
           <div className="row field-row">
             <select
               className="grow"
@@ -293,24 +329,30 @@ export default function KafkaPanel() {
                 setPicked(name);
               }}
             >
-              save
+              Save
             </button>
             <button className="btn-field btn-danger" disabled={!picked} onClick={() => { persistConns(conns.filter((c) => c.name !== picked)); setPicked(''); }}>
-              delete
+              Delete
             </button>
           </div>
+          <div className="hint">Shared across every tab in this panel.</div>
 
-          <label>Brokers (comma-separated host:port)</label>
+          <label>Brokers</label>
           <div className="row field-row">
             <input className="grow" value={conn.brokers} spellCheck={false} placeholder="localhost:9092" onChange={(e) => setConn('brokers', e.target.value)} />
-            <button className="btn-field" onClick={listTopics}>list topics</button>
+            <button className="btn-field" onClick={listTopics}>List topics</button>
           </div>
+          <div className="hint">One or more <code>host:port</code>, comma-separated.</div>
 
-          <div className="row field-row" style={{ marginTop: 6 }}>
-            <label style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input type="checkbox" style={{ width: 'auto' }} checked={conn.ssl} onChange={(e) => setConn('ssl', e.target.checked)} />
+          <label>Transport</label>
+          <div className="inline">
+            <button
+              className={`btn-field ${conn.ssl ? 'btn-on' : ''}`}
+              title="Connect to the brokers over SSL"
+              onClick={() => setConn('ssl', !conn.ssl)}
+            >
               SSL
-            </label>
+            </button>
           </div>
           <div className="row field-row field-row-gap">
             <input placeholder="SASL user (optional)" value={conn.saslUser} onChange={(e) => setConn('saslUser', e.target.value)} />
@@ -320,9 +362,12 @@ export default function KafkaPanel() {
           {topics.length > 0 && (
             <>
               <label>Topics <span className="count">({topics.length})</span></label>
-              <div className="keylist" style={{ maxHeight: 200 }}>
+              {/* Rows are a mouse shortcut only: a cluster can list hundreds of
+                  topics, and the Topic field on the right offers the same
+                  choice from a datalist for keyboard users. */}
+              <div className="keylist">
                 {topics.map((t) => (
-                  <div key={t} className={`keyrow ${t === active.topic ? 'keyrow-active' : ''}`} onClick={() => editConsumeField('topic', t)} title="select for this tab">
+                  <div key={t} className={`keyrow ${t === active.topic ? 'keyrow-active' : ''}`} onClick={() => editConsumeField('topic', t)} title="Select this topic for the active tab">
                     <span className="kname">{t}</span>
                   </div>
                 ))}
@@ -334,7 +379,7 @@ export default function KafkaPanel() {
         </div>
 
         <div className="right">
-          <label style={{ marginTop: 0 }}>Topic <span className="count">(this tab)</span></label>
+          <label>Topic <span className="count">(this tab)</span></label>
           <input
             list="kafka-topics-r"
             value={active.topic}
@@ -348,66 +393,90 @@ export default function KafkaPanel() {
             ))}
           </datalist>
 
-          <div className="tabs" style={{ margin: '12px 0' }}>
-            <span className={rtab === 'consume' ? 'tab active' : 'tab'} onClick={() => setRtab('consume')}>
+          <div className="tabs mt-3" role="tablist" aria-label="Direction">
+            <button
+              type="button"
+              className={rtab === 'consume' ? 'tab active' : 'tab'}
+              role="tab"
+              aria-selected={rtab === 'consume'}
+              onClick={() => setRtab('consume')}
+            >
               Consume {isConsuming ? '🟢' : ''}
-            </span>
-            <span className={rtab === 'produce' ? 'tab active' : 'tab'} onClick={() => setRtab('produce')}>
+            </button>
+            <button
+              type="button"
+              className={rtab === 'produce' ? 'tab active' : 'tab'}
+              role="tab"
+              aria-selected={rtab === 'produce'}
+              onClick={() => setRtab('produce')}
+            >
               Produce
-            </span>
+            </button>
           </div>
 
-          <div style={{ display: rtab === 'produce' ? undefined : 'none' }}>
-            <label>Key (optional)</label>
+          <div hidden={rtab !== 'produce'}>
+            <label>Key</label>
             <input placeholder="player-123" value={active.key} spellCheck={false} onChange={(e) => setA('key', e.target.value)} />
-            <label>Headers (k: v per line — per-message metadata)</label>
+            <div className="hint">Optional. Decides the partition and the ordering group.</div>
+            <label>Headers</label>
             <textarea rows={3} value={active.headers} spellCheck={false} placeholder="trace-id: abc" onChange={(e) => setA('headers', e.target.value)} />
-            <label>Value (JSON or text)</label>
+            <div className="hint">Per-message metadata. One <code>k: v</code> per line.</div>
+            <label>Value</label>
             <textarea
               rows={7}
               value={active.value}
               spellCheck={false}
-              placeholder='{"event":"something-happened"}   ·   ⌘/Ctrl+Enter to send'
+              placeholder='{"event":"something-happened"}'
               onChange={(e) => setA('value', e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) produce(); }}
             />
-            <button onClick={produce}>Send ▶</button>
+            <div className="hint">JSON or plain text. <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> sends.</div>
+            <button onClick={produce}>Send</button>
           </div>
 
-          <div style={{ display: rtab === 'consume' ? undefined : 'none' }}>
-            <label>Consume (live) <span className="count">— other tabs keep streaming in background</span></label>
+          <div hidden={rtab !== 'consume'}>
+            <label>Consume</label>
             <div className="row field-row">
               <input className="grow" placeholder="group id (blank = auto, throwaway)" value={active.group} onChange={(e) => setA('group', e.target.value)} />
-              <label style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 6, flex: '0 0 auto' }}>
-                <input type="checkbox" style={{ width: 'auto' }} checked={active.fromBeginning} onChange={(e) => editConsumeField('fromBeginning', e.target.checked)} />
-                from beginning
-              </label>
-              <button className={`btn-field ${isConsuming ? 'btn-danger' : ''}`} onClick={() => toggleConsume(active.id)}>
-                {isConsuming ? 'stop' : 'consume'}
+              <button
+                className={`btn-field ${active.fromBeginning ? 'btn-on' : ''}`}
+                title="Read the topic from the earliest retained offset instead of the newest"
+                onClick={() => editConsumeField('fromBeginning', !active.fromBeginning)}
+              >
+                From beginning
+              </button>
+              <button className={`btn-field ${isConsuming ? 'btn-on' : ''}`} onClick={() => toggleConsume(active.id)}>
+                {isConsuming ? 'Disconnect' : 'Connect'}
               </button>
             </div>
-            <div className={`hint ${cs === 'error' ? 'error' : ''}`} style={{ marginTop: 4 }}>
-              {cs === 'live'
-                ? `🟢 LIVE · subscribed${connMap[active.id]?.msg ? ` (${connMap[active.id]!.msg})` : ''}`
-                : cs === 'connecting'
-                  ? '🟡 connecting…'
-                  : cs === 'error'
-                    ? `🔴 ERROR — ${connMap[active.id]?.msg}`
-                    : '⚪ stopped'}
-            </div>
+            <div className="hint">Every other tab keeps streaming in the background.</div>
+            <div className={`${connCls} mt-2`}>{connText}</div>
+            {rawFeed.length === 0 && cs !== 'live' && (
+              <div className="empty mt-3">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Not consuming</div>
+                <div className="empty-hint">Set a topic and press <kbd>Connect</kbd> to stream messages here.</div>
+              </div>
+            )}
+            {rawFeed.length === 0 && cs === 'live' && (
+              <div className="empty mt-3">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Connected, no messages yet</div>
+                <div className="empty-hint">Records written to this topic will appear here. Produce one from the Produce tab to check the path end to end.</div>
+              </div>
+            )}
             {rawFeed.length > 0 && (
               <>
-                <div className="feed-head">
+                <div className="feed-head inline">
                   <span className="count">{fq ? `${shownFeed.length} / ${rawFeed.length}` : rawFeed.length} messages</span>
                   <input
                     className="grow"
-                    style={{ margin: '0 8px', padding: '2px 6px', fontSize: 12 }}
                     placeholder="filter messages"
                     value={feedFilter[active.id] ?? ''}
                     spellCheck={false}
                     onChange={(e) => setFeedFilter((f) => ({ ...f, [active.id]: e.target.value }))}
                   />
-                  <span className="chip" onClick={() => setFeeds((f) => ({ ...f, [active.id]: [] }))}>clear</span>
+                  <button className="btn-field btn-danger" title="Discard the messages received so far" onClick={() => setFeeds((f) => ({ ...f, [active.id]: [] }))}>Clear</button>
                 </div>
                 <div className="feed">
                   {shownFeed.map((m) => {
@@ -418,15 +487,17 @@ export default function KafkaPanel() {
                         <span className="feed-ch">
                           p{m.partition} · offset {m.offset}
                           {m.key ? ` · key ${m.key}` : ''}
-                          <span className="chip" style={{ marginLeft: 8 }} onClick={() => navigator.clipboard.writeText(m.payload)}>copy</span>
                         </span>
                         <span className="feed-time">{new Date(m.at).toLocaleTimeString()}</span>
                         {hdrs && (
-                          <div className="feed-ch" style={{ opacity: 0.7 }}>
+                          <div className="feed-props">
                             {Object.entries(hdrs).map(([k, v]) => `${k}: ${v}`).join('  ·  ')}
                           </div>
                         )}
-                        <div className="feed-msg">{pretty ?? m.payload}</div>
+                        <div className="feed-msg break">{pretty ?? m.payload}</div>
+                        <div className="inline mt-1">
+                          <button className="btn-field" title="Copy this record's value to the clipboard" onClick={() => navigator.clipboard.writeText(m.payload)}>Copy</button>
+                        </div>
                       </div>
                     );
                   })}

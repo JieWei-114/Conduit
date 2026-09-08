@@ -19,6 +19,17 @@ async function boot() {
     /* first run / server store unavailable — fall back to plain localStorage */
   }
 
+  /* The theme has to be applied here rather than only from the inline script in
+     index.html: that script runs before this hydration, so it can only see what
+     the browser happens to hold. This is the first point where the server store
+     has been merged in and the saved value is authoritative. Both exist on
+     purpose — the inline script avoids a flash of the wrong scheme on a warm
+     load, this settles the correct one. */
+  const savedTheme = localStorage.getItem('conduit.theme.v1');
+  if (savedTheme === 'light' || savedTheme === 'dark')
+    document.documentElement.setAttribute('data-theme', savedTheme);
+  else document.documentElement.removeAttribute('data-theme');
+
   let timer: ReturnType<typeof setTimeout> | undefined;
   const save = () => {
     clearTimeout(timer);

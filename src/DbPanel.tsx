@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { rowKeyDown, rowTabIndex } from './rowNav';
+import { useDialog } from './useDialog';
 
 const LS_FORM = 'conduit.db.form.v1';
 const LS_TABS = 'conduit.db.tabs.v1';
@@ -111,6 +113,8 @@ export default function DbPanel() {
   const [hist, setHist] = useState<HistItem[]>(() => loadJson(LS_HISTORY, []));
   const [view, setView] = useState<'table' | 'json'>('table');
   const [expanded, setExpanded] = useState<{ v: string } | null>(null);
+  const closeExpanded = useCallback(() => setExpanded(null), []);
+  const dialogRef = useDialog(expanded !== null, closeExpanded);
   // per-tab result / busy / schema list
   const [resMap, setResMap] = useState<Record<number, DbRes | null>>({});
   const [busyMap, setBusyMap] = useState<Record<number, boolean>>({});
@@ -216,28 +220,49 @@ export default function DbPanel() {
 
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs">
+      <div className="req-tabs" role="tablist" aria-label="Query tabs">
         {tabs.map((t) => (
-          <span
+          <button
+            type="button"
             key={t.id}
             className={`req-tab ${t.id === activeId ? 'active' : ''}`}
+            role="tab"
+            aria-selected={t.id === activeId}
             onClick={() => setActiveId(t.id)}
             title={t.form.query || t.form.url || 'new query'}
           >
             {busyMap[t.id] ? '⏳ ' : ''}
             {tabLabel(t)}
             {tabs.length > 1 && (
+              // Lives inside the tab button, so it stays a role="button" span:
+              // a button cannot contain another button.
               <i
                 className="chip-x"
+                role="button"
+                tabIndex={0}
+                aria-label="close tab"
                 title="close tab"
                 onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeTab(t.id);
+                  }
+                }}
               >
                 {' '}✕
               </i>
             )}
-          </span>
+          </button>
         ))}
-        <span className="req-tab req-tab-add" title="new query tab (clones this connection)" onClick={addTab}>+</span>
+        <button
+          type="button"
+          className="req-tab req-tab-add"
+          aria-label="new query tab (clones this connection)"
+          title="new query tab (clones this connection)"
+          onClick={addTab}
+        >+</button>
       </div>
 
     <div className="layout">
@@ -272,11 +297,13 @@ export default function DbPanel() {
               persistConns([...conns.filter((c) => c.name !== name), { name, driver: form.driver, url: form.url.trim() }]);
               setPicked(name);
             }}
+            title="Save the driver and URL below under a name"
           >
             save
           </button>
           <button
             className="btn-field btn-danger"
+            title="Delete the selected saved connection"
             disabled={!picked}
             onClick={() => {
               persistConns(conns.filter((c) => c.name !== picked));
@@ -288,7 +315,11 @@ export default function DbPanel() {
         </div>
 
         <div className="row field-row field-row-gap">
-          <select value={form.driver} onChange={(e) => { set('driver', e.target.value as Driver); setTables([]); }} style={{ width: 150, flex: '0 0 auto' }}>
+          <select
+            className="w-md"
+            value={form.driver}
+            onChange={(e) => { set('driver', e.target.value as Driver); setTables([]); }}
+          >
             <option value="postgres">PostgreSQL</option>
             <option value="mysql">MySQL</option>
             <option value="mongodb">MongoDB</option>
@@ -303,8 +334,12 @@ export default function DbPanel() {
           />
         </div>
 
-        <div className="row field-row" style={{ marginTop: 6 }}>
-          <button className="btn-field" onClick={loadTables} style={{ width: 150, flex: '0 0 auto' }}>
+        <div className="row field-row field-row-gap">
+          <button
+            className="btn-field w-md"
+            onClick={loadTables}
+            title="Read the schema from this connection"
+          >
             {form.driver === 'mongodb' ? 'list collections' : 'list tables'}
           </button>
           {tables.length > 0 && (
@@ -316,8 +351,11 @@ export default function DbPanel() {
             />
           )}
         </div>
+        {/* Table rows are a mouse shortcut only: a schema can hold hundreds of
+            them. The same result is reachable from the keyboard by typing the
+            query in the box below and pressing Run. */}
         {tables.length > 0 && (
-          <div className="keylist" style={{ maxHeight: 160 }}>
+          <div className="keylist">
             {shownTables.map((t) => (
               <div
                 key={t}
@@ -327,7 +365,7 @@ export default function DbPanel() {
                   set('query', q);
                   run(q);
                 }}
-                title="fill the query box and run SELECT * on this"
+                title={`Fill the query box with a first-rows query on ${t} and run it`}
               >
                 <span className="kname">{t}</span>
               </div>
@@ -335,11 +373,12 @@ export default function DbPanel() {
           </div>
         )}
 
-        <label>
+        <label>Query</label>
+        <div className="hint mb-1">
           {form.driver === 'mongodb'
-            ? 'Query — {collection, filter?, limit?, sort?} | {collection, pipeline} | {command}'
-            : 'Query — SQL'}
-        </label>
+            ? 'JSON: {collection, filter?, limit?, sort?} · {collection, pipeline} · {command}'
+            : 'Plain SQL for this driver.'}
+        </div>
         <textarea
           rows={10}
           value={form.query}
@@ -352,28 +391,37 @@ export default function DbPanel() {
         />
         <div className="hint">⌘/Ctrl + Enter to run · results capped at 500 rows</div>
 
-        <button disabled={busy} onClick={() => run()}>
+        <button disabled={busy} onClick={() => run()} title="Run this query against the connection above">
           {busy ? 'Running…' : 'Run ▶'}
         </button>
 
         {hist.length > 0 && (
           <>
             <label>Recent queries</label>
-            <div className="keylist" style={{ maxHeight: 150 }}>
+            <div className="keylist">
               {hist.slice(0, 12).map((h, i) => (
                 <div
                   key={i}
                   className={`keyrow ${h.ok ? '' : 'hist-bad'}`}
-                  title={h.query}
+                  role="button"
+                  tabIndex={rowTabIndex(i)}
+                  title={`Load this query into the box:\n${h.query}`}
                   onClick={() => set('query', h.query)}
+                  onKeyDown={rowKeyDown(() => set('query', h.query))}
                 >
-                  <span className="tbadge" style={{ background: 'var(--border-soft)', color: 'var(--text-faint)' }}>
-                    {h.ok ? (h.rowCount ?? '') : 'err'}
-                  </span>
+                  <span className="badge">{h.ok ? (h.rowCount ?? '') : 'err'}</span>
                   <span className="kname">{h.query.replace(/\s+/g, ' ').slice(0, 42)}</span>
                 </div>
               ))}
-              <span className="chip" onClick={() => { setHist([]); localStorage.removeItem(LS_HISTORY); }}>clear</span>
+            </div>
+            <div className="inline mt-2">
+              <button
+                className="btn-field btn-danger"
+                onClick={() => { setHist([]); localStorage.removeItem(LS_HISTORY); }}
+                title="Forget every remembered query"
+              >
+                clear history
+              </button>
             </div>
           </>
         )}
@@ -391,22 +439,59 @@ export default function DbPanel() {
           ))}
 
         {res?.ok && (
-          <div className="chips" style={{ marginBottom: 8 }}>
-            <span className={`chip ${view === 'table' ? 'chip-active' : ''}`} onClick={() => setView('table')}>table</span>
-            <span className={`chip ${view === 'json' ? 'chip-active' : ''}`} onClick={() => setView('json')}>json</span>
-            <span className="chip" onClick={() => navigator.clipboard.writeText(JSON.stringify(res.rows, null, 2))}>copy JSON</span>
-            <span className="chip" onClick={download}>export CSV</span>
+          <div className="inline mb-2">
+            <button
+              className={`btn-ghost ${view === 'table' ? 'btn-on' : ''}`}
+              onClick={() => setView('table')}
+              title="Show the rows as a table"
+            >
+              table
+            </button>
+            <button
+              className={`btn-ghost ${view === 'json' ? 'btn-on' : ''}`}
+              onClick={() => setView('json')}
+              title="Show the raw JSON rows"
+            >
+              json
+            </button>
+            <button
+              className="btn-field"
+              onClick={() => navigator.clipboard.writeText(JSON.stringify(res.rows, null, 2))}
+              title="Copy all rows as JSON to the clipboard"
+            >
+              copy JSON
+            </button>
+            <button className="btn-field" onClick={download} title="Download all rows as a CSV file">
+              export CSV
+            </button>
           </div>
         )}
 
-        {res == null && <pre>Pick a driver, paste a connection URL, list tables or write a query, Run.</pre>}
+        {res == null && (
+          <div className="empty">
+            <div className="empty-icon">◇</div>
+            <div className="empty-title">No query run yet</div>
+            <div className="empty-hint">
+              Paste a connection URL on the left, then click a table to query it or type SQL and press{' '}
+              <kbd>⌘/Ctrl + Enter</kbd>.
+            </div>
+          </div>
+        )}
 
         {res?.ok && view === 'json' && <pre>{JSON.stringify(res.rows, null, 2)}</pre>}
 
         {res?.ok && view === 'table' && (
-          <div style={{ overflowX: 'auto' }}>
+          // wide result sets scroll here instead of scrolling the whole page
+          <div className="table-scroll">
             {cols.length === 0 ? (
-              <pre>(no rows)</pre>
+              <div className="empty">
+                <div className="empty-icon">◇</div>
+                <div className="empty-title">Query returned no rows</div>
+                <div className="empty-hint">
+                  The query ran fine but matched nothing. Loosen the <kbd>WHERE</kbd> clause, or click a table on
+                  the left to see its first rows.
+                </div>
+              </div>
             ) : (
               <table className="rtable">
                 <thead>
@@ -419,10 +504,13 @@ export default function DbPanel() {
                         const s = cell(r[c]);
                         const long = s.length > 80;
                         return (
+                          // Truncated cells open a panel on click but are not tab
+                          // stops: a result set is up to 500 rows wide of them.
+                          // The json view above shows every value in full.
                           <td
                             key={c}
-                            style={long ? { cursor: 'pointer' } : undefined}
-                            title={long ? 'click to expand' : undefined}
+                            className={long ? 'cell-click' : undefined}
+                            title={long ? 'Click to open the full value in a panel' : s || undefined}
                             onClick={() => long && setExpanded({ v: s })}
                           >
                             {long ? s.slice(0, 80) + '…' : s}
@@ -438,14 +526,30 @@ export default function DbPanel() {
         )}
 
         {expanded && (
-          <div className="modal" onClick={() => setExpanded(null)}>
-            <div className="modal-box" onClick={(e) => e.stopPropagation()}>
-              <div className="feed-head">
+          <div className="modal" onClick={closeExpanded}>
+            <div
+              className="modal-box"
+              ref={dialogRef}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Cell value"
+              tabIndex={-1}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="feed-head inline">
                 <span className="count">cell value</span>
-                <span className="chip" onClick={() => navigator.clipboard.writeText(expanded.v)}>copy</span>
-                <span className="chip" onClick={() => setExpanded(null)}>close</span>
+                <button
+                  className="btn-field spacer"
+                  onClick={() => navigator.clipboard.writeText(expanded.v)}
+                  title="Copy this cell value to the clipboard"
+                >
+                  copy
+                </button>
+                <button className="btn-ghost" onClick={closeExpanded} title="Close this panel (Esc)">
+                  close
+                </button>
               </div>
-              <pre style={{ maxHeight: '60vh', overflow: 'auto' }}>
+              <pre className="cell-json">
                 {(() => {
                   try {
                     return JSON.stringify(JSON.parse(expanded.v), null, 2);

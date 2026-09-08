@@ -407,15 +407,30 @@ export default function PulsarPanel() {
       )
     : rawFeed;
   const isConsuming = !!consuming[active.id];
+  // one wording for connection state across every streaming panel
+  const cs = connState[active.id]?.s ?? 'idle';
+  const csMsg = connState[active.id]?.msg;
+  const connText =
+    cs === 'live'
+      ? `Connected${csMsg ? ` · ${csMsg}` : ''}`
+      : cs === 'connecting'
+        ? 'Connecting…'
+        : cs === 'error'
+          ? `Error — ${csMsg}`
+          : 'Disconnected';
+  const connCls = cs === 'live' ? 'status ok' : cs === 'error' ? 'status bad' : 'status';
 
   return (
     <div className="grpc-wrap">
       {/* Chrome-style tabs — connection is shared; each tab is its own probe */}
-      <div className="req-tabs">
+      <div className="req-tabs" role="tablist" aria-label="Pulsar tabs">
         {tabs.map((t) => (
-          <span
+          <button
+            type="button"
             key={t.id}
             className={`req-tab ${t.id === activeId ? 'active' : ''}`}
+            role="tab"
+            aria-selected={t.id === activeId}
             onClick={() => setActiveId(t.id)}
             title={t.topic}
           >
@@ -428,22 +443,40 @@ export default function PulsarPanel() {
                   : ''}
             {tabLabel(t)}
             {tabs.length > 1 && (
+              // Lives inside the tab button, so it stays a role="button" span:
+              // a button cannot contain another button.
               <i
                 className="chip-x"
-                title="close tab"
+                role="button"
+                tabIndex={0}
+                aria-label="Close this tab"
+                title="Close this tab"
                 onClick={(e) => {
                   e.stopPropagation();
                   closeTab(t.id);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeTab(t.id);
+                  }
                 }}
               >
                 {' '}✕
               </i>
             )}
-          </span>
+          </button>
         ))}
-        <span className="req-tab req-tab-add" title="new probe tab (shares this connection)" onClick={addTab}>
+        <button
+          type="button"
+          className="req-tab req-tab-add"
+          aria-label="New tab (shares this connection)"
+          title="New tab (shares this connection)"
+          onClick={addTab}
+        >
           +
-        </span>
+        </button>
       </div>
 
       <div className="layout">
@@ -452,7 +485,7 @@ export default function PulsarPanel() {
             Pulsar <span className="badge">pulsar-rs</span>
           </h3>
 
-          <label>Saved connections (shared across all tabs)</label>
+          <label>Saved connection</label>
           <div className="row field-row">
             <select className="grow" value={pickedConn} onChange={(e) => applyConn(e.target.value)}>
               <option value=""> - </option>
@@ -460,12 +493,14 @@ export default function PulsarPanel() {
                 <option key={c.name} value={c.name}>{c.name}</option>
               ))}
             </select>
-            <button className="btn-field" onClick={saveConn}>save</button>
-            <button className="btn-field btn-danger" disabled={!pickedConn} onClick={deleteConn}>delete</button>
+            <button className="btn-field" onClick={saveConn}>Save</button>
+            <button className="btn-field btn-danger" disabled={!pickedConn} onClick={deleteConn}>Delete</button>
           </div>
+          <div className="hint">Shared across every tab in this panel.</div>
 
-          <label>Service URL (pulsar:// or pulsar+ssl://)</label>
+          <label>Service URL</label>
           <input value={conn.serviceUrl} spellCheck={false} onChange={(e) => setC('serviceUrl', e.target.value)} />
+          <div className="hint">Broker address — <code>pulsar://</code> or <code>pulsar+ssl://</code>.</div>
 
           <label>Auth</label>
           <select value={conn.authType} onChange={(e) => setC('authType', e.target.value as any)}>
@@ -493,7 +528,7 @@ export default function PulsarPanel() {
             </>
           )}
 
-          <label>Admin URL (optional — topics / subs / peek / stats, usually http://host:8080)</label>
+          <label>Admin URL</label>
           <div className="row field-row">
             <input
               className="grow"
@@ -503,9 +538,10 @@ export default function PulsarPanel() {
               onChange={(e) => setAdminUrl(e.target.value)}
             />
             <button className="btn-field" disabled={!adminUrl.trim()} onClick={loadTenants}>
-              load
+              Load
             </button>
           </div>
+          <div className="hint">Optional. Enables topics, subscriptions, peek and stats — usually <code>http://host:8080</code>.</div>
 
           <label>Tenant / Namespace</label>
           <div className="row field-row">
@@ -530,7 +566,7 @@ export default function PulsarPanel() {
               ))}
             </select>
             <button className="btn-field" disabled={!adminUrl.trim()} onClick={listTopics}>
-              list topics
+              List topics
             </button>
           </div>
 
@@ -539,76 +575,93 @@ export default function PulsarPanel() {
 
         <div className="right">
           {/* per-tab work area: topic on top, then Consume / Produce / Stats */}
-          <label style={{ marginTop: 0 }}>Topic <span className="count">(this tab)</span></label>
-          <div className="row field-row">
-            <input
-              className="grow"
-              list="pulsar-topics"
-              value={active.topic}
-              spellCheck={false}
-              onChange={(e) => editConsumeField('topic', e.target.value)}
-              placeholder="persistent://public/default/…"
-            />
-          </div>
+          <label>Topic <span className="count">(this tab)</span></label>
+          <input
+            list="pulsar-topics"
+            value={active.topic}
+            spellCheck={false}
+            onChange={(e) => editConsumeField('topic', e.target.value)}
+            placeholder="persistent://public/default/…"
+          />
           <datalist id="pulsar-topics">
             {topics.map((t) => (
               <option key={t} value={t} />
             ))}
           </datalist>
 
-          <div className="tabs" style={{ margin: '12px 0' }}>
-            <span className={rtab === 'consume' ? 'tab active' : 'tab'} onClick={() => setRtab('consume')}>
-              Consume {isConsuming ? '🟢' : ''}
-            </span>
-            <span className={rtab === 'produce' ? 'tab active' : 'tab'} onClick={() => setRtab('produce')}>
-              Produce
-            </span>
-            <span className={rtab === 'subs' ? 'tab active' : 'tab'} onClick={() => setRtab('subs')}>
-              Subs
-            </span>
-            <span className={rtab === 'peek' ? 'tab active' : 'tab'} onClick={() => setRtab('peek')}>
-              Peek
-            </span>
-            <span className={rtab === 'stats' ? 'tab active' : 'tab'} onClick={() => setRtab('stats')}>
-              Stats
-            </span>
+          <div className="tabs mt-3" role="tablist" aria-label="Pulsar view">
+            {([
+              ['consume', `Consume ${isConsuming ? '🟢' : ''}`],
+              ['produce', 'Produce'],
+              ['subs', 'Subs'],
+              ['peek', 'Peek'],
+              ['stats', 'Stats'],
+            ] as const).map(([id, label]) => (
+              <button
+                type="button"
+                key={id}
+                className={rtab === id ? 'tab active' : 'tab'}
+                role="tab"
+                aria-selected={rtab === id}
+                onClick={() => setRtab(id)}
+              >
+                {label}
+              </button>
+            ))}
           </div>
 
-          <div style={{ display: rtab === 'produce' ? undefined : 'none' }}>
-            <label>Payload (JSON or text)</label>
+          <div hidden={rtab !== 'produce'}>
+            <label>Payload</label>
             <textarea rows={8} value={active.payload} spellCheck={false}
               placeholder='{"messageType":"...","data":{...}}'
               onChange={(e) => setA('payload', e.target.value)} />
-            <label>Properties (k: v per line — per-message metadata, like headers)</label>
+            <div className="hint">JSON or plain text.</div>
+            <label>Properties</label>
             <textarea rows={3} value={active.props} spellCheck={false} placeholder="source: conduit" onChange={(e) => setA('props', e.target.value)} />
-            <div className="row field-row" style={{ marginTop: 8 }}>
+            <div className="hint">Per-message metadata, like headers. One <code>k: v</code> per line.</div>
+            <div className="row field-row field-row-gap">
               <div className="grow">
-                <label style={{ margin: '0 0 3px' }}>Key (optional — routing / Key_Shared ordering)</label>
+                <label>Key</label>
                 <input value={active.key} spellCheck={false} placeholder="player-123" onChange={(e) => setA('key', e.target.value)} />
+                <div className="hint">Optional. Routing and Key_Shared ordering.</div>
               </div>
-              <div style={{ maxWidth: 170 }}>
-                <label style={{ margin: '0 0 3px' }}>Deliver after (ms, optional)</label>
-                <input value={active.delayMs} placeholder="e.g. 60000 = 1min" onChange={(e) => setA('delayMs', e.target.value)} />
+              <div className="w-md">
+                <label>Deliver after</label>
+                <input value={active.delayMs} placeholder="60000" onChange={(e) => setA('delayMs', e.target.value)} />
+                <div className="hint">Milliseconds. Blank sends immediately.</div>
               </div>
             </div>
             {Number(active.delayMs) > 0 && (
-              <div className="hint">delayed message — the broker holds it; only Shared / Key_Shared subscriptions honour the delay</div>
+              <div className="hint">Delayed message — the broker holds it; only Shared and Key_Shared subscriptions honour the delay.</div>
             )}
-            <button onClick={produce}>Send ▶</button>
+            <button onClick={produce}>Send</button>
           </div>
 
-          <div style={{ display: rtab === 'subs' ? undefined : 'none' }}>
+          <div hidden={rtab !== 'subs'}>
             <div className="row field-row">
               <button className="btn-field" disabled={!adminUrl.trim() || !active.topic.trim()} onClick={loadSubs}>
-                load subscriptions
+                Load subscriptions
               </button>
-              <div className="hint" style={{ margin: 0 }}>
-                {adminUrl.trim() ? 'who is consuming this topic, and how far behind' : 'set the Admin URL on the left first'}
+              <div className="hint">
+                {adminUrl.trim() ? 'Who is consuming this topic, and how far behind.' : 'Set the Admin URL on the left first.'}
               </div>
             </div>
-            {subs && subs.length === 0 && <pre style={{ marginTop: 8 }}>(no subscriptions on this topic)</pre>}
+            {subs && subs.length === 0 && (
+              <div className="empty mt-2">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">No subscriptions</div>
+                <div className="empty-hint">Nothing is subscribed to this topic yet. Start a consumer on the Consume tab, then load again.</div>
+              </div>
+            )}
+            {!subs && (
+              <div className="empty mt-2">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Subscriptions not loaded</div>
+                <div className="empty-hint">Press <kbd>Load subscriptions</kbd> to see consumers and backlog for this topic.</div>
+              </div>
+            )}
             {subs && subs.length > 0 && (
-              <table className="rtable" style={{ marginTop: 8 }}>
+              <table className="rtable">
                 <thead>
                   <tr>
                     <th>subscription</th><th>type</th><th>backlog</th><th>consumers</th>
@@ -620,48 +673,62 @@ export default function PulsarPanel() {
                     <tr key={s.name}>
                       <td>{s.name}</td>
                       <td>{s.type}</td>
-                      <td style={s.backlog > 0 ? { color: 'var(--warn)', fontWeight: 600 } : undefined}>{s.backlog}</td>
-                      <td style={s.consumers === 0 ? { color: 'var(--bad)', fontWeight: 600 } : undefined}>{s.consumers}</td>
+                      <td className={s.backlog > 0 ? 'text-warn' : undefined}>{s.backlog}</td>
+                      <td className={s.consumers === 0 ? 'text-bad' : undefined}>{s.consumers}</td>
                       <td>{s.msgRateOut}/s</td>
                       <td>{s.lastConsumedTimestamp ? new Date(s.lastConsumedTimestamp).toLocaleString() : '-'}</td>
-                      <td style={{ whiteSpace: 'nowrap' }}>
-                        <span className="chip" title="skip the whole backlog" onClick={() => skipBacklog(s.name, s.backlog)}>clear backlog</span>{' '}
-                        <span className="chip chip-del" onClick={() => deleteSub(s.name)}>delete</span>
+                      <td className="nowrap">
+                        <button className="btn-field btn-danger" title="Skip the whole backlog for this subscription" onClick={() => skipBacklog(s.name, s.backlog)}>Clear backlog</button>{' '}
+                        <button className="btn-field btn-danger" title="Delete this subscription" onClick={() => deleteSub(s.name)}>Delete</button>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
-            {subs && (
-              <div className="hint" style={{ marginTop: 6 }}>
-                backlog &gt; 0 + consumers = 0 → nobody is consuming (stuck / not deployed) · high backlog with consumers → consumer too slow
+            {subs && subs.length > 0 && (
+              <div className="hint mt-2">
+                Backlog &gt; 0 with 0 consumers means nobody is consuming (stuck or not deployed). A high backlog
+                with consumers attached means the consumer is too slow.
               </div>
             )}
           </div>
 
-          <div style={{ display: rtab === 'peek' ? undefined : 'none' }}>
+          <div hidden={rtab !== 'peek'}>
             <div className="row field-row">
-              <select value={peekPos} onChange={(e) => setPeekPos(e.target.value as any)} style={{ maxWidth: 130 }}>
+              <select className="w-sm" value={peekPos} onChange={(e) => setPeekPos(e.target.value as any)} title="Read from the newest or the oldest end">
                 <option value="latest">latest</option>
                 <option value="earliest">earliest</option>
               </select>
-              <input style={{ maxWidth: 80 }} value={peekCount} title="how many (max 20)" onChange={(e) => setPeekCount(e.target.value)} />
+              <input className="w-xs" value={peekCount} title="How many messages to read (max 20)" onChange={(e) => setPeekCount(e.target.value)} />
               <button className="btn-field" disabled={!adminUrl.trim() || !active.topic.trim()} onClick={doPeek}>
-                peek
+                Peek
               </button>
-              <div className="hint" style={{ margin: 0 }}>read without consuming — nothing is acked, no subscription touched</div>
+              <div className="hint">Reads without consuming — nothing is acked and no subscription is touched.</div>
             </div>
-            {peeked && peeked.length === 0 && <pre style={{ marginTop: 8 }}>(topic is empty)</pre>}
+            {!peeked && (
+              <div className="empty mt-2">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Nothing peeked yet</div>
+                <div className="empty-hint">Choose an end of the topic and press <kbd>Peek</kbd> to read messages without consuming them.</div>
+              </div>
+            )}
+            {peeked && peeked.length === 0 && (
+              <div className="empty mt-2">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Topic is empty</div>
+                <div className="empty-hint">No messages are retained here. Publish one from the Produce tab, then peek again.</div>
+              </div>
+            )}
             {peeked && peeked.length > 0 && (
-              <div className="feed" style={{ marginTop: 8 }}>
+              <div className="feed">
                 {peeked.map((m) => {
                   const pretty = tryJson(m.payload);
                   return (
                     <div key={m.pos} className="feed-item">
                       <span className="feed-ch">#{m.pos} from {peekPos}</span>
                       {m.publishTime && <span className="feed-time">{m.publishTime}</span>}
-                      <div className="feed-msg">{pretty ?? m.payload}</div>
+                      <div className="feed-msg break">{pretty ?? m.payload}</div>
                     </div>
                   );
                 })}
@@ -669,62 +736,63 @@ export default function PulsarPanel() {
             )}
           </div>
 
-          <div style={{ display: rtab === 'consume' ? undefined : 'none' }}>
-            <label>Consume (live) <span className="count">— other tabs keep streaming in background</span></label>
+          <div hidden={rtab !== 'consume'}>
+            <label>Consume</label>
             <div className="row field-row">
               <input className="grow" placeholder="subscription (blank = auto, unique)" value={active.subscription} onChange={(e) => editConsumeField('subscription', e.target.value)} />
-              <select value={active.subType} onChange={(e) => editConsumeField('subType', e.target.value)} style={{ maxWidth: 130 }}>
+              <select className="w-md" value={active.subType} onChange={(e) => editConsumeField('subType', e.target.value)} title="Subscription type">
                 <option>Exclusive</option>
                 <option>Shared</option>
                 <option>Failover</option>
                 <option>KeyShared</option>
               </select>
-              <select value={active.position} onChange={(e) => editConsumeField('position', e.target.value)} style={{ maxWidth: 110 }}>
+              <select className="w-sm" value={active.position} onChange={(e) => editConsumeField('position', e.target.value)} title="Where the subscription starts reading">
                 <option value="latest">latest</option>
                 <option value="earliest">earliest</option>
               </select>
-              <button className={`btn-field ${isConsuming ? 'btn-danger' : ''}`} onClick={() => toggleConsume(active.id)}>
-                {isConsuming ? 'stop' : 'consume'}
+              <button className={`btn-field ${isConsuming ? 'btn-on' : ''}`} onClick={() => toggleConsume(active.id)}>
+                {isConsuming ? 'Disconnect' : 'Connect'}
               </button>
             </div>
-            {(() => {
-              const cs = connState[active.id]?.s ?? 'idle';
-              const label =
-                cs === 'live'
-                  ? `🟢 LIVE · subscribed${connState[active.id]?.msg ? ` (${connState[active.id]!.msg})` : ''} — really listening`
-                  : cs === 'connecting'
-                    ? '🟡 connecting… (not subscribed yet)'
-                    : cs === 'error'
-                      ? `🔴 ERROR — ${connState[active.id]?.msg}`
-                      : '⚪ stopped';
-              return <div className={`hint ${cs === 'error' ? 'error' : ''}`} style={{ marginTop: 4 }}>{label}</div>;
-            })()}
+            <div className="hint">Every other tab keeps streaming in the background.</div>
+            <div className={`${connCls} mt-2`}>{connText}</div>
             <input
-              className="grow"
-              style={{ marginTop: 6 }}
-              placeholder="filter — only show messages containing this (e.g. QA playerId); blank = all"
+              placeholder="live filter — only stream messages containing this; blank streams all"
               value={active.filter}
               spellCheck={false}
               onChange={(e) => editConsumeField('filter', e.target.value)}
             />
             {isConsuming && active.filter.trim() && (
-              <div className="hint">filtering live on “{active.filter.trim()}” — non-matching messages are acked but hidden</div>
+              <div className="hint">Filtering live on “{active.filter.trim()}” — non-matching messages are acked but hidden.</div>
+            )}
+            {rawFeed.length === 0 && cs !== 'live' && (
+              <div className="empty mt-3">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Not consuming</div>
+                <div className="empty-hint">Set a topic and press <kbd>Connect</kbd> to stream messages here.</div>
+              </div>
+            )}
+            {rawFeed.length === 0 && cs === 'live' && (
+              <div className="empty mt-3">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">Connected, no messages yet</div>
+                <div className="empty-hint">Messages published to this topic will appear here. Publish one from the Produce tab to check the path end to end.</div>
+              </div>
             )}
             {rawFeed.length > 0 && (
               <>
-                <div className="feed-head">
+                <div className="feed-head inline">
                   <span className="count">
                     {fq ? `${feed.length} / ${rawFeed.length}` : rawFeed.length} messages
                   </span>
                   <input
                     className="grow"
-                    style={{ margin: '0 8px', padding: '2px 6px', fontSize: 12 }}
-                    placeholder="search received (e.g. QA playerId) — client-side, doesn't drop messages"
+                    placeholder="filter messages"
                     value={feedFilter[active.id] ?? ''}
                     spellCheck={false}
                     onChange={(e) => setFeedFilter((f) => ({ ...f, [active.id]: e.target.value }))}
                   />
-                  <span className="chip" onClick={() => setFeeds((f) => ({ ...f, [active.id]: [] }))}>clear</span>
+                  <button className="btn-field btn-danger" title="Discard the messages received so far" onClick={() => setFeeds((f) => ({ ...f, [active.id]: [] }))}>Clear</button>
                 </div>
                 <div className="feed">
                 {feed.map((m) => {
@@ -736,7 +804,7 @@ export default function PulsarPanel() {
                       {Object.keys(m.properties).length > 0 && (
                         <div className="feed-props">{JSON.stringify(m.properties)}</div>
                       )}
-                      <div className="feed-msg">{pretty ?? m.payload}</div>
+                      <div className="feed-msg break">{pretty ?? m.payload}</div>
                     </div>
                   );
                 })}
@@ -745,21 +813,28 @@ export default function PulsarPanel() {
             )}
           </div>
 
-          <div style={{ display: rtab === 'stats' ? undefined : 'none' }}>
+          <div hidden={rtab !== 'stats'}>
             <div className="row field-row">
               <button
                 className="btn-field"
                 disabled={!adminUrl.trim() || !active.topic.trim()}
                 onClick={loadStats}
               >
-                load stats
+                Load stats
               </button>
-              <div className="hint" style={{ margin: 0 }}>
-                {adminUrl.trim() ? 'rates · backlog · subscriptions for this topic' : 'set the Admin URL on the left first'}
+              <div className="hint">
+                {adminUrl.trim() ? 'Rates, backlog and subscriptions for this topic.' : 'Set the Admin URL on the left first.'}
               </div>
-              {stats && <span className="chip" onClick={() => setStats('')}>clear</span>}
+              {stats && <button className="btn-field btn-danger" title="Discard the loaded stats" onClick={() => setStats('')}>Clear</button>}
             </div>
-            {stats && <pre style={{ marginTop: 8, maxHeight: 480, overflow: 'auto' }}>{stats}</pre>}
+            {!stats && (
+              <div className="empty mt-2">
+                <div className="empty-icon">◈</div>
+                <div className="empty-title">No stats loaded</div>
+                <div className="empty-hint">Press <kbd>Load stats</kbd> to fetch throughput, backlog and subscription counters for this topic.</div>
+              </div>
+            )}
+            {stats && <pre className="cell-json">{stats}</pre>}
           </div>
         </div>
       </div>

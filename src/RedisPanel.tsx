@@ -342,8 +342,15 @@ export default function RedisPanel() {
               <option key={c.name} value={c.name}>{c.name}</option>
             ))}
           </select>
-          <button className="btn-field" onClick={saveConn}>save</button>
-          <button className="btn-field btn-danger" disabled={!pickedConn} onClick={deleteConn}>delete</button>
+          <button className="btn-field" onClick={saveConn} title="Save the fields below under a name">save</button>
+          <button
+            className="btn-field btn-danger"
+            disabled={!pickedConn}
+            onClick={deleteConn}
+            title="Delete the selected saved connection"
+          >
+            delete
+          </button>
         </div>
 
         <div className="conn-row">
@@ -359,50 +366,61 @@ export default function RedisPanel() {
         </div>
         <div className="conn-row">
           <div className="grow">
-            <label>Password (blank if none)</label>
-            <input type="password" value={password} spellCheck={false}
+            <label>Password</label>
+            <input type="password" value={password} spellCheck={false} placeholder="blank if none"
               onChange={(e) => setPassword(e.target.value)} />
           </div>
           <div className="conn-sm">
             <label>DB</label>
             <input value={db} placeholder="0" onChange={(e) => setDb(e.target.value)} />
           </div>
-          <button className="btn-field" onClick={ping}>ping</button>
+          <button className="btn-field" onClick={ping} title="Send PING to check the connection">ping</button>
         </div>
         <div className="hint">{url.replace(/:\/\/:[^@]*@/, '://:***@')}</div>
 
-        <label>Key</label>
-        <div className="row field-row">
-          <input
-            className="grow"
-            value={path}
-            spellCheck={false}
-            placeholder="*:*:* or *_*_*"
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && go()}
-          />
-          <button className="btn-field" onClick={go}>go</button>
+        <label>Key or prefix</label>
+        <input
+          value={path}
+          spellCheck={false}
+          placeholder="*:*:* or *_*_*"
+          onChange={(e) => setPath(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && go()}
+        />
+        <div className="hint">
+          An exact key opens its value; anything else is browsed as a prefix. <kbd>Enter</kbd> also scans.
         </div>
+        <button onClick={go} title="Open this exact key, or browse it as a prefix">Scan ▶</button>
 
         {children.length > 0 && (
           <>
             <div className="crumbs">
-              <span className="crumb" onClick={() => crumbTo('')}>root</span>
+              <button
+                type="button"
+                className="crumb"
+                title="Browse from the root prefix"
+                onClick={() => crumbTo('')}
+              >
+                root
+              </button>
               {path
                 .replace(/:$/, '')
                 .split(':')
                 .filter(Boolean)
-                .map((seg, i, arr) => (
-                  <span key={i}>
-                    <span className="crumb-sep">/</span>
-                    <span
+                .flatMap((seg, i, arr) => {
+                  const prefix = arr.slice(0, i + 1).join(':') + ':';
+                  return [
+                    <span key={`sep-${i}`} className="crumb-sep">/</span>,
+                    <button
+                      type="button"
+                      key={`seg-${i}`}
                       className="crumb"
-                      onClick={() => crumbTo(arr.slice(0, i + 1).join(':') + ':')}
+                      title={`Browse ${prefix}`}
+                      onClick={() => crumbTo(prefix)}
                     >
                       {seg}
-                    </span>
-                  </span>
-                ))}
+                    </button>,
+                  ];
+                })}
             </div>
 
             <input
@@ -414,61 +432,84 @@ export default function RedisPanel() {
           </>
         )}
 
-        <div className="keylist">
-          {children
-            .filter((ch) => (levelFilter ? ch.seg.toLowerCase().includes(levelFilter.toLowerCase()) : true))
-            .map((ch) => {
-              const color = ch.isKey ? TYPE_COLORS[ch.type ?? ''] ?? 'var(--text-dim)' : 'var(--text-dim)';
-              const badge = ch.isKey ? ch.type : 'dir';
-              return (
-                <div
-                  key={ch.full}
-                  className={`keyrow ${view?.key === ch.full ? 'keyrow-active' : ''}`}
-                  onClick={() => (ch.hasChildren ? drill(ch.full) : openKey(ch.full))}
-                >
-                  <span className="tbadge" style={{ background: color + '33', color }}>{badge}</span>
-                  <span className="kname">{ch.seg}</span>
-                  <span className="kcount">
-                    {ch.count}
-                    {ch.hasChildren ? ' ›' : ''}
-                  </span>
-                  {ch.isKey && ch.hasChildren && (
-                    <span
-                      className="open-mini"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openKey(ch.full);
-                      }}
-                    >
-                      open
+        {children.length === 0 ? (
+          <div className="empty mt-3">
+            <div className="empty-icon">◇</div>
+            <div className="empty-title">No keys loaded</div>
+            <div className="empty-hint">
+              Enter a pattern like <kbd>user:*</kbd> in the key box above and press Scan to list this level.
+            </div>
+          </div>
+        ) : (
+          // Key rows are a mouse shortcut only: a scan can list hundreds of
+          // them, so they are not tab stops. The key box above reaches any key
+          // or prefix from the keyboard — an exact key opens its value, a
+          // prefix browses that level.
+          <div className="keylist">
+            {children
+              .filter((ch) => (levelFilter ? ch.seg.toLowerCase().includes(levelFilter.toLowerCase()) : true))
+              .map((ch) => {
+                const color = ch.isKey ? TYPE_COLORS[ch.type ?? ''] ?? 'var(--text-dim)' : 'var(--text-dim)';
+                const badge = ch.isKey ? ch.type : 'dir';
+                return (
+                  <div
+                    key={ch.full}
+                    className={`keyrow ${view?.key === ch.full ? 'keyrow-active' : ''}`}
+                    title={ch.hasChildren ? `Browse inside ${ch.full}` : `Open ${ch.full}`}
+                    onClick={() => (ch.hasChildren ? drill(ch.full) : openKey(ch.full))}
+                  >
+                    {/* the type colour is data-driven, so it cannot come from a class */}
+                    <span className="tbadge" style={{ background: color + '33', color }}>{badge}</span>
+                    <span className="kname">{ch.seg}</span>
+                    <span className="kcount">
+                      {ch.count}
+                      {ch.hasChildren ? ' ›' : ''}
                     </span>
-                  )}
-                </div>
-              );
-            })}
-        </div>
+                    {ch.isKey && ch.hasChildren && (
+                      <span
+                        className="open-mini"
+                        title={`Open the value of ${ch.full} instead of browsing into it`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openKey(ch.full);
+                        }}
+                      >
+                        open
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        )}
 
         {status && <div className="hint">{status}</div>}
       </div>
 
       {/* ── right: three clear tabs ── */}
       <div className="right">
-        <div className="tabs">
-          <span className={rtab === 'value' ? 'tab active' : 'tab'} onClick={() => setRtab('value')}>
-            Value (view / edit)
-          </span>
-          <span className={rtab === 'commands' ? 'tab active' : 'tab'} onClick={() => setRtab('commands')}>
-            Commands
-          </span>
-          <span className={rtab === 'pubsub' ? 'tab active' : 'tab'} onClick={() => setRtab('pubsub')}>
-            Pub / Sub
-          </span>
-          <span className={rtab === 'info' ? 'tab active' : 'tab'} onClick={() => setRtab('info')}>
-            Info
-          </span>
+        <div className="tabs" role="tablist" aria-label="Redis view">
+          {([
+            ['value', 'Value'],
+            ['commands', 'Commands'],
+            ['pubsub', 'Pub / Sub'],
+            ['info', 'Info'],
+          ] as const).map(([id, label]) => (
+            <button
+              type="button"
+              key={id}
+              className={rtab === id ? 'tab active' : 'tab'}
+              role="tab"
+              aria-selected={rtab === id}
+              onClick={() => setRtab(id)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
-        <div style={{ display: rtab === 'value' ? undefined : 'none' }}>
+        {/* every tab body stays mounted so a tab switch keeps its scroll and inputs */}
+        <div hidden={rtab !== 'value'}>
           {view ? (
             <KeyDetail
               view={view}
@@ -488,29 +529,36 @@ export default function RedisPanel() {
               onLoadMore={loadMoreValue}
             />
           ) : (
-            <pre>← Find a key on the left, then click it to view and edit its value.</pre>
+            <div className="empty">
+              <div className="empty-icon">◇</div>
+              <div className="empty-title">No value selected</div>
+              <div className="empty-hint">
+                Scan a prefix on the left, then click a key row to view, edit and expire its value.
+              </div>
+            </div>
           )}
         </div>
 
-        <div style={{ display: rtab === 'commands' ? undefined : 'none' }}>
+        <div hidden={rtab !== 'commands'}>
           <CommandsTab url={url} targetKey={commandsKey} hintType={view?.type} />
         </div>
 
-        <div style={{ display: rtab === 'pubsub' ? undefined : 'none' }}>
+        <div hidden={rtab !== 'pubsub'}>
           <div>
-            <div className="hint" style={{ marginBottom: 10 }}>
+            <div className="hint mb-2">
               Pub/Sub is independent of keys — publish to a channel or listen live.
             </div>
-            <label>PUBLISH</label>
+            <label>Publish</label>
             <div className="row field-row">
-              <input placeholder="channel" value={channel} onChange={(e) => setChannel(e.target.value)} style={{ maxWidth: 220 }} />
+              <input className="w-md" placeholder="channel" value={channel} onChange={(e) => setChannel(e.target.value)} />
               <input className="grow" placeholder='{"messageType":...}' value={pubMsg} spellCheck={false} onChange={(e) => setPubMsg(e.target.value)} />
-              <button className="btn-field" onClick={publish}>publish</button>
+              <button className="btn-field" onClick={publish} title="Publish this message to the channel">publish</button>
             </div>
 
-            <label>
-              SUBSCRIBE — channels, comma-separated ( <code>*</code> = wildcard, e.g. <code>events:*</code> or <code>*</code> for all )
-            </label>
+            <label>Subscribe</label>
+            <div className="hint mb-2">
+              Comma-separated channels. <kbd>*</kbd> is a wildcard, e.g. <kbd>events:*</kbd>, or <kbd>*</kbd> for all.
+            </div>
             <div className="row field-row">
               <input
                 className="grow"
@@ -519,16 +567,22 @@ export default function RedisPanel() {
                 disabled={subscribed}
                 onChange={(e) => setSubChannels(e.target.value)}
               />
-              <button className={`btn-field ${subscribed ? 'btn-danger' : ''}`} onClick={toggleSubscribe}>
+              <button
+                className={`btn-field ${subscribed ? 'btn-danger' : ''}`}
+                onClick={toggleSubscribe}
+                title={subscribed ? 'Stop listening on these channels' : 'Start listening on these channels'}
+              >
                 {subscribed ? 'stop' : 'listen'}
               </button>
             </div>
             {subscribed && <div className="hint">listening: {subChannels} — press stop to change</div>}
             {feed.length > 0 && (
               <>
-                <div className="feed-head">
+                <div className="feed-head inline">
                   <span className="count">{feed.length} messages</span>
-                  <span className="chip" onClick={() => setFeed([])}>clear</span>
+                  <button className="btn-field spacer" onClick={() => setFeed([])} title="Discard the messages received so far">
+                    clear feed
+                  </button>
                 </div>
                 <div className="feed">
                   {feed.map((f) => {
@@ -547,7 +601,7 @@ export default function RedisPanel() {
           </div>
         </div>
 
-        <div style={{ display: rtab === 'info' ? undefined : 'none' }}>
+        <div hidden={rtab !== 'info'}>
           <InfoTab url={url} />
         </div>
       </div>
@@ -600,9 +654,11 @@ function InfoTab({ url }: { url: string }) {
 
   return (
     <div>
-      <div className="row field-row" style={{ marginBottom: 10 }}>
-        <button className="btn-field" onClick={refresh}>refresh INFO</button>
-        <div className="hint" style={{ margin: 0 }}>server stats for the connected instance</div>
+      <div className="inline mb-2">
+        <button className="btn-field" onClick={refresh} title="Read INFO from the connected instance">
+          refresh INFO
+        </button>
+        <div className="hint">server stats for the connected instance</div>
       </div>
 
       {sections && (
@@ -634,7 +690,8 @@ function InfoTab({ url }: { url: string }) {
       )}
 
       <div className="section">
-        <label>Export keys (JSON download — pattern, up to 2000 keys)</label>
+        <label>Export keys</label>
+        <div className="hint mb-2">Downloads a JSON file of keys matching the pattern, up to 2000 keys.</div>
         <div className="row field-row">
           <input
             className="grow"
@@ -643,21 +700,34 @@ function InfoTab({ url }: { url: string }) {
             placeholder="myprefix:*"
             onChange={(e) => setExportMatch(e.target.value)}
           />
-          <button className="btn-field" disabled={exporting} onClick={doExport}>
+          <button
+            className="btn-field"
+            disabled={exporting}
+            onClick={doExport}
+            title="Download matching keys and values as JSON"
+          >
             {exporting ? 'exporting…' : 'export'}
           </button>
         </div>
       </div>
 
-      {err && <div className="hint" style={{ marginTop: 8 }}>{err}</div>}
-      {!sections && !err && <pre style={{ marginTop: 8 }}>Press "refresh INFO" to load server stats.</pre>}
+      {err && <div className="hint mt-2">{err}</div>}
+      {!sections && (
+        <div className="empty mt-3">
+          <div className="empty-icon">◇</div>
+          <div className="empty-title">No server stats yet</div>
+          <div className="empty-hint">
+            Press <kbd>refresh INFO</kbd> above to read version, memory and ops/sec from this instance.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// ── 功能二: commands chosen by the selected key's type ──────────────────────
-// 功能二: free-form target key (root → drill down, may not exist yet) +
-// multi-line batch runner + type-aware template chips. Run many at once.
+// ── commands chosen by the selected key's type ──────────────────────────────
+// Free-form target key (root → drill down, may not exist yet) + multi-line
+// batch runner + type-aware template chips. Run many at once.
 function CommandsTab({
   url,
   targetKey,
@@ -707,12 +777,15 @@ function CommandsTab({
 
   return (
     <div>
-      <div className="hint" style={{ marginBottom: 6 }}>
+      <div className="hint mb-1">
         Free-form batch. Set a target key (edit the root / drill down), insert command
         templates, paste as many lines as you want, then <b>Run all</b>.
       </div>
 
-      <label>Target key (used by the insert chips — you can also type any key per line)</label>
+      <label>Target key</label>
+      <div className="hint mb-1">
+        Fills <kbd>{'{k}'}</kbd> in the insert chips below; each command line can still name its own key.
+      </div>
       <input
         value={key}
         spellCheck={false}
@@ -725,19 +798,23 @@ function CommandsTab({
         <div key={t} className="tpl-group">
           <span className="tpl-type">{t}</span>
           {TEMPLATES[t].map(({ tpl, desc }) => (
-            <span
+            <button
+              type="button"
               key={tpl}
               className="chip"
               title={`${tpl.split(' ')[0]} — ${desc}\n\n${tpl.replaceAll('{k}', key || '<key>')}`}
               onClick={() => append(tpl)}
             >
               {tpl.split(' ')[0]}
-            </span>
+            </button>
           ))}
         </div>
       ))}
 
-      <label>Commands (one per line · quotes respected · # = comment · ⌘/Ctrl+Enter runs)</label>
+      <label>Commands</label>
+      <div className="hint mb-1">
+        One per line · quotes respected · <kbd>#</kbd> starts a comment · <kbd>⌘/Ctrl + Enter</kbd> runs them all.
+      </div>
       <textarea
         rows={12}
         value={script}
@@ -748,31 +825,52 @@ function CommandsTab({
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) runAll();
         }}
       />
-      <div className="row field-row" style={{ marginTop: 8 }}>
-        <button className="grow" style={{ marginTop: 0 }} disabled={busy} onClick={runAll}>
+      <div className="inline mt-2">
+        <button className="mini" disabled={busy} onClick={runAll} title="Run every command line in order">
           {busy ? 'Running…' : 'Run all ▶'}
         </button>
-        <button className="btn-field" onClick={() => { setScript(''); setResults(null); }}>
-          clear
+        <button
+          className="btn-field"
+          onClick={() => { setScript(''); setResults(null); }}
+          title="Empty the command box and drop the results"
+        >
+          clear script
         </button>
       </div>
 
-      {results && (
-        <div className="section" style={{ marginTop: 14 }}>
-          <div className="feed-head">
-            <div className={`status ${okCount === results.length ? 'ok' : 'bad'}`} style={{ margin: 0, flex: 1 }}>
-              {okCount}/{results.length} ok
-            </div>
-            <span className="chip" onClick={() => setResults(null)}>clear</span>
+      {results ? (
+        <div className="section">
+          <div className={`status ${okCount === results.length ? 'ok' : 'bad'}`}>
+            {okCount}/{results.length} ok
+          </div>
+          <div className="inline mb-2">
+            <span className="count">{results.length} replies</span>
+            <button
+              className="btn-field spacer"
+              onClick={() => setResults(null)}
+              title="Discard these replies"
+            >
+              clear results
+            </button>
           </div>
           {results.map((r, i) => (
             <div key={i} className={`hist-item ${r.ok ? 'hist-ok' : 'hist-bad'}`}>
-              <div className="cmd-preview" style={{ marginTop: 0 }}>{r.argv.join(' ')}</div>
-              <pre className="cell-json" style={{ marginTop: 4 }}>
+              <div className="cmd-preview">{r.argv.join(' ')}</div>
+              <pre className="cell-json mt-1">
                 {r.ok ? JSON.stringify(r.reply) : `ERROR: ${r.error}`}
               </pre>
             </div>
           ))}
+        </div>
+      ) : (
+        <div className="section">
+          <div className="empty">
+            <div className="empty-icon">◇</div>
+            <div className="empty-title">No commands run yet</div>
+            <div className="empty-hint">
+              Insert a template above or type a line like <kbd>TTL user:1</kbd>, then press Run all.
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -836,7 +934,17 @@ function KeyDetail({
               <tr key={i}>
                 <td><Cell value={isZ ? b : a} fmtJsonOn={fmtJsonOn} /></td>
                 <td><Cell value={isZ ? a : b} fmtJsonOn={fmtJsonOn} /></td>
-                <td><span className="del-x" onClick={() => onDelMember(isZ ? b : a)}>✕</span></td>
+                <td>
+                  <button
+                    type="button"
+                    className="del-x"
+                    aria-label={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
+                    title={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
+                    onClick={() => onDelMember(isZ ? b : a)}
+                  >
+                    ✕
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -850,7 +958,17 @@ function KeyDetail({
           {arr.map((v, i) => (
             <tr key={i}>
               <td><Cell value={v} fmtJsonOn={fmtJsonOn} /></td>
-              <td><span className="del-x" onClick={() => onDelMember(v)}>✕</span></td>
+              <td>
+                <button
+                  type="button"
+                  className="del-x"
+                  aria-label={`Remove this element from ${view.key}`}
+                  title={`Remove this element from ${view.key}`}
+                  onClick={() => onDelMember(v)}
+                >
+                  ✕
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>
@@ -867,32 +985,41 @@ function KeyDetail({
 
   return (
     <div>
-      <div className="status" style={{ background: color + '22', color }}>
+      {/* the header carries the key's type colour, which is data-driven */}
+      <div className="status break" style={{ background: color + '22', color }}>
         {view.type} · {view.key} · TTL{' '}
         {view.ttl === -1 ? '∞' : view.ttl === -2 ? 'gone' : `${view.ttl}s`}
         {count}
       </div>
-      <div className="row field-row" style={{ marginBottom: 8 }}>
+      <div className="row field-row mb-2">
         <input
+          className="w-md"
           placeholder="ttl seconds (-1 persist)"
           value={ttlInput}
           onChange={(e) => setTtlInput(e.target.value)}
-          style={{ maxWidth: 180 }}
         />
-        <button className="btn-field" onClick={() => onExpire(Number(ttlInput))}>expire</button>
-        <button className="btn-field" onClick={onRefresh}>refresh</button>
-        <button className="btn-field" onClick={copyValue}>copy</button>
-        <button className={`btn-field ${fmtJsonOn ? 'btn-on' : ''}`} onClick={onToggleFmt}>
+        <button className="btn-field" onClick={() => onExpire(Number(ttlInput))} title="Set this key's TTL to the seconds entered">
+          expire
+        </button>
+        <button className="btn-field" onClick={onRefresh} title="Re-read this key from the server">refresh</button>
+        <button className="btn-field" onClick={copyValue} title="Copy the whole value to the clipboard">copy</button>
+        <button
+          className={`btn-field ${fmtJsonOn ? 'btn-on' : ''}`}
+          onClick={onToggleFmt}
+          title="Pretty-print values that parse as JSON"
+        >
           {fmtJsonOn ? 'JSON: on' : 'JSON: off'}
         </button>
-        <button className="btn-field btn-danger" onClick={onDelKey}>DEL key</button>
+        <button className="btn-field btn-danger" onClick={onDelKey} title={`Delete the whole key ${view.key}`}>
+          DEL key
+        </button>
       </div>
       {rows()}
       {view.nextCursor && (
-        <div className="chips" style={{ marginTop: 8 }}>
-          <span className="chip" onClick={onLoadMore}>
+        <div className="inline mt-2">
+          <button className="btn-field" onClick={onLoadMore} title="Append the next page of elements to this view">
             load more (next ~500 of {view.total})
-          </span>
+          </button>
         </div>
       )}
       <AddRow type={view.type} onAdd={onAdd} />
@@ -907,38 +1034,46 @@ function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, un
     return (
       <div className="row field-row addrow">
         <input className="grow" placeholder="new value" value={a} onChange={(e) => setA(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ value: a })}>set</button>
+        <button className="btn-field" onClick={() => onAdd({ value: a })} title="Overwrite the string value">set</button>
       </div>
     );
   if (type === 'hash')
     return (
       <div className="row field-row addrow">
-        <input placeholder="field" value={a} onChange={(e) => setA(e.target.value)} style={{ maxWidth: 160 }} />
+        <input className="w-md" placeholder="field" value={a} onChange={(e) => setA(e.target.value)} />
         <input className="grow" placeholder="value" value={b} onChange={(e) => setB(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ field: a, value: b })}>hset</button>
+        <button className="btn-field" onClick={() => onAdd({ field: a, value: b })} title="Set this field on the hash">
+          hset
+        </button>
       </div>
     );
   if (type === 'zset')
     return (
       <div className="row field-row addrow">
-        <input placeholder="score" value={a} onChange={(e) => setA(e.target.value)} style={{ maxWidth: 120 }} />
+        <input className="w-sm" placeholder="score" value={a} onChange={(e) => setA(e.target.value)} />
         <input className="grow" placeholder="member" value={b} onChange={(e) => setB(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ score: a, member: b })}>zadd</button>
+        <button className="btn-field" onClick={() => onAdd({ score: a, member: b })} title="Add this member with the given score">
+          zadd
+        </button>
       </div>
     );
   if (type === 'set')
     return (
       <div className="row field-row addrow">
         <input className="grow" placeholder="member" value={a} onChange={(e) => setA(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ member: a })}>sadd</button>
+        <button className="btn-field" onClick={() => onAdd({ member: a })} title="Add this member to the set">sadd</button>
       </div>
     );
   if (type === 'list')
     return (
       <div className="row field-row addrow">
         <input className="grow" placeholder="value" value={a} onChange={(e) => setA(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ value: a, left: false })}>rpush</button>
-        <button className="btn-field" onClick={() => onAdd({ value: a, left: true })}>lpush</button>
+        <button className="btn-field" onClick={() => onAdd({ value: a, left: false })} title="Append to the tail of the list">
+          rpush
+        </button>
+        <button className="btn-field" onClick={() => onAdd({ value: a, left: true })} title="Prepend to the head of the list">
+          lpush
+        </button>
       </div>
     );
   return null;

@@ -400,6 +400,10 @@ async fn unary(
     }
     request.set_timeout(std::time::Duration::from_millis(timeout_ms));
 
+    // `from_maybe_shared` requires `'static`, and `path` is a borrowed `&str`,
+    // so the allocation is load-bearing. Clippy does not weigh that bound and
+    // suggests passing the reference, which does not compile.
+    #[allow(clippy::unnecessary_to_owned)]
     let path = http::uri::PathAndQuery::from_maybe_shared(path.to_string()).map_err(|e| UnaryErr {
         code: 3,
         details: e.to_string(),
