@@ -286,6 +286,8 @@ export default function GrpcPanel() {
   const [reflErr, setReflErr] = useState('');
   const [reflSvcSel, setReflSvcSel] = useState('');
   const [reflMethodSel, setReflMethodSel] = useState('');
+  const [reflSvcFilter, setReflSvcFilter] = useState('');
+  const [reflMethodFilter, setReflMethodFilter] = useState('');
   /** Show the .proto picker instead of the server's own list. */
   const useProtoInstead = () => {
     set('methodSource', 'proto');
@@ -837,6 +839,36 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
     form.transport === 'gateway' ? 'proto' : form.methodSource;
   const reflecting = source === 'reflection';
 
+  /* The reflected method in hand, so the one Invoke button below can answer for
+     both pickers: which call to make, whether it is callable, and what to say
+     when it is not. Without this the button can only see `current`, which the
+     .proto pipeline fills and reflection never does. */
+  const reflSvc = reflSvcs?.find((s) => s.service === reflSvcSel);
+  const reflMethod = reflecting
+    ? reflSvc?.methods.find((m) => m.name === reflMethodSel) ?? null
+    : null;
+  const reflStreaming = !!reflMethod && (reflMethod.requestStream || reflMethod.responseStream);
+  const canInvoke = reflecting ? !!reflMethod && !reflStreaming : !!current;
+  /* The one gate for both the button and Cmd/Ctrl+Enter, so the keyboard path
+     cannot fire a call the button refuses. */
+  const invoke = () => {
+    if (busy || !canInvoke) return;
+    return reflecting ? sendReflect() : send();
+  };
+
+  /* Filtering matches the .proto picker: the same two boxes, the same n/total
+     counts. The selected entry is always kept in its list, so narrowing the
+     filter can never leave the select showing something other than what is
+     actually selected. */
+  const svcMatches = (reflSvcs ?? []).filter(
+    (s) => s.service === reflSvcSel ||
+      s.service.toLowerCase().includes(reflSvcFilter.trim().toLowerCase()),
+  );
+  const methodMatches = (reflSvc?.methods ?? []).filter(
+    (m) => m.name === reflMethodSel ||
+      m.name.toLowerCase().includes(reflMethodFilter.trim().toLowerCase()),
+  );
+
   return (
     <div className="grpc-wrap">
       {/* Chrome-style request tabs — each holds an independent request */}
@@ -997,49 +1029,59 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                   </button>
                   <button className="btn-field" onClick={clearReflect}>clear</button>
                 </div>
-                <label>Service</label>
+                <label>
+                  Service{' '}
+                  <span className="count">({svcMatches.length}/{reflSvcs.length})</span>
+                </label>
+                <input
+                  className="mb4"
+                  placeholder="filter services"
+                  value={reflSvcFilter}
+                  spellCheck={false}
+                  onChange={(e) => setReflSvcFilter(e.target.value)}
+                />
                 <select
                   value={reflSvcSel}
-                  onChange={(e) => { setReflSvcSel(e.target.value); setReflMethodSel(''); }}
+                  onChange={(e) => {
+                    setReflSvcSel(e.target.value);
+                    setReflMethodSel('');
+                    setReflMethodFilter('');
+                  }}
                 >
-                  {reflSvcs.map((s) => (
+                  {svcMatches.map((s) => (
                     <option key={s.service} value={s.service}>{s.service}</option>
                   ))}
                 </select>
-                <label>Method</label>
+                <label>
+                  Method{' '}
+                  <span className="count">
+                    ({methodMatches.length}/{reflSvc?.methods.length ?? 0})
+                  </span>
+                </label>
+                <input
+                  className="mb4"
+                  placeholder="filter methods"
+                  value={reflMethodFilter}
+                  spellCheck={false}
+                  onChange={(e) => setReflMethodFilter(e.target.value)}
+                />
                 <select
                   value={reflMethodSel}
                   onChange={(e) => pickReflMethod(reflSvcSel, e.target.value)}
                 >
                   <option value="">— pick a method —</option>
-                  {reflSvcs.find((s) => s.service === reflSvcSel)?.methods.map((m) => (
+                  {methodMatches.map((m) => (
                     <option key={m.name} value={m.name}>
                       {m.name}{m.requestStream || m.responseStream ? ' (stream)' : ''}
                     </option>
                   ))}
                 </select>
-                {reflMethodSel && (() => {
-                  const m = reflSvcs.find((s) => s.service === reflSvcSel)?.methods.find((x) => x.name === reflMethodSel);
-                  if (!m) return null;
-                  const streaming = m.requestStream || m.responseStream;
-                  return (
-                    <>
-                      <div className="hint mt-2 break">
-                        {m.requestType} → {m.responseType} · template loaded into the request body below
-                      </div>
-                      <div className="inline mt-3">
-                        <button
-                          className="btn-accent"
-                          disabled={busy || streaming}
-                          onClick={sendReflect}
-                          title={streaming ? 'streaming RPCs are not supported here' : ''}
-                        >
-                          {busy ? 'Invoking…' : streaming ? 'streaming — not supported' : 'Invoke ▶'}
-                        </button>
-                      </div>
-                    </>
-                  );
-                })()}
+                {reflMethod && (
+                  <div className="hint mt-2 break">
+                    {reflMethod.requestType} → {reflMethod.responseType} · template loaded into
+                    the request body below
+                  </div>
+                )}
               </div>
             )}
           </>
@@ -1239,7 +1281,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
         <label>Request body</label>
         <div className="hint mb-1">
-          {form.transport === 'direct' && reflMethodSel
+          {reflecting && reflMethod
             ? 'JSON — reflection encodes it from the server descriptor'
             : 'proto text format, not JSON'}
         </div>
@@ -1264,10 +1306,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           placeholder={'field1: "value"\nlimit: 10'}
           onChange={(e) => set('body', e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              if (form.transport === 'direct' && reflMethodSel) sendReflect();
-              else send();
-            }
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) invoke();
           }}
         />
         <div className="chips">
@@ -1296,8 +1335,12 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
         />
         <div className="hint">milliseconds</div>
 
-        <button disabled={busy || !current} onClick={send}>
-          {busy ? 'Invoking…' : 'Invoke ▶'}
+        <button
+          disabled={busy || !canInvoke}
+          onClick={invoke}
+          title={reflStreaming ? 'streaming RPCs are not supported here' : ''}
+        >
+          {busy ? 'Invoking…' : reflStreaming ? 'streaming — not supported' : 'Invoke ▶'}
         </button>
         <div className="hint">
           <kbd>⌘</kbd>/<kbd>Ctrl</kbd>+<kbd>Enter</kbd> from the request body also invokes
