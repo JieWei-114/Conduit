@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { useFlash } from './useFlash';
+import { SaveAs } from './SaveAs';
+import { useArmedConfirm } from './useArmedConfirm';
 import type { RedisKeyView, RedisType } from './types';
 
 const LS_CONNS = 'conduit.redis.conns.v3';
@@ -235,13 +238,8 @@ export default function RedisPanel() {
       setDb(c.db);
     }
   };
-  const saveConn = () => {
-    if (!host.trim()) return;
-    const name = prompt('Name this connection (e.g. local, staging, prod):', '');
-    if (!name) return;
-    persistConns([...conns.filter((c) => c.name !== name), { name, host, port, password, db }]);
-    setPickedConn(name);
-  };
+  const [flashMsg, flash] = useFlash();
+
   const deleteConn = () => {
     persistConns(conns.filter((c) => c.name !== pickedConn));
     setPickedConn('');
@@ -279,7 +277,6 @@ export default function RedisPanel() {
 
   const delKey = async (member?: string) => {
     if (!view) return;
-    if (!member && !confirm(`DEL ${view.key} ?`)) return;
     const r = await post('del', { url, key: view.key, type: view.type, member });
     if (!r.ok) return setStatus(`✗ ${r.error}`);
     if (member) refreshKey();
@@ -342,7 +339,15 @@ export default function RedisPanel() {
               <option key={c.name} value={c.name}>{c.name}</option>
             ))}
           </select>
-          <button className="btn-field" onClick={saveConn} title="Save the fields below under a name">save</button>
+          <SaveAs
+            canSave={() => (host.trim() ? null : 'Enter a host first')}
+            onSave={(name) => {
+              persistConns([...conns.filter((c) => c.name !== name), { name, host, port, password, db }]);
+              setPickedConn(name);
+              return `Saved "${name}"`;
+            }}
+            onMessage={flash}
+          />
           <button
             className="btn-field btn-danger"
             disabled={!pickedConn}
@@ -352,6 +357,7 @@ export default function RedisPanel() {
             delete
           </button>
         </div>
+        {flashMsg && <div className="toast">{flashMsg}</div>}
 
         <div className="conn-row">
           <div className="grow">
@@ -904,6 +910,9 @@ function KeyDetail({
   onLoadMore: () => void;
 }) {
   const [ttlInput, setTtlInput] = useState('');
+  // Deleting the whole key is the destructive one here; removing a single
+  // member is cheap and undone by adding it back, so only the key arms.
+  const delArmed = useArmedConfirm();
   const color = TYPE_COLORS[view.type] ?? 'var(--text-dim)';
 
   const copyValue = () =>
@@ -1010,8 +1019,14 @@ function KeyDetail({
         >
           {fmtJsonOn ? 'JSON: on' : 'JSON: off'}
         </button>
-        <button className="btn-field btn-danger" onClick={onDelKey} title={`Delete the whole key ${view.key}`}>
-          DEL key
+        <button
+          className="btn-field btn-danger"
+          onClick={() => (delArmed.isArmed('key') ? onDelKey() : delArmed.arm('key'))}
+          onMouseLeave={delArmed.disarm}
+          onBlur={delArmed.disarm}
+          title={`Delete the whole key ${view.key}`}
+        >
+          {delArmed.showsArmed('key') ? 'Confirm DEL' : 'DEL key'}
         </button>
       </div>
       {rows()}

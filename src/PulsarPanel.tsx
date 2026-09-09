@@ -1,4 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
+import { useFlash } from './useFlash';
+import { SaveAs } from './SaveAs';
+import { useArmedConfirm } from './useArmedConfirm';
 import type { PulsarConnConfig, PulsarMessageIn } from './types';
 
 const LS_CONNS = 'conduit.pulsar.conns.v1';
@@ -211,15 +214,17 @@ export default function PulsarPanel() {
     setStatus(`${r.subs.length} subscriptions`);
   };
 
-  const skipBacklog = async (sub: string, backlog: number) => {
-    if (!confirm(`Clear the entire backlog (${backlog} msgs) of subscription "${sub}"?\nThose messages are SKIPPED for this subscription — they will never be delivered to it.`)) return;
+  const subAction = useArmedConfirm();
+
+  const skipBacklog = async (sub: string) => {
+    subAction.disarm();
     const r = await adminPost('sub-skip', { topic: active.topic.trim(), sub });
     setStatus(r.ok ? `backlog cleared for "${sub}"` : `✗ ${r.error}`);
     if (r.ok) loadSubs();
   };
 
   const deleteSub = async (sub: string) => {
-    if (!confirm(`Delete subscription "${sub}"?\nFails if consumers are still connected.`)) return;
+    subAction.disarm();
     const r = await adminPost('sub-delete', { topic: active.topic.trim(), sub });
     setStatus(r.ok ? `deleted "${sub}"` : `✗ ${r.error}`);
     if (r.ok) loadSubs();
@@ -260,14 +265,8 @@ export default function PulsarPanel() {
     const c = conns.find((x) => x.name === name);
     if (c) setConn(c);
   };
-  const saveConn = () => {
-    const name = prompt('Name this connection (e.g. local, staging, prod):', '');
-    if (!name) return;
-    const c = { ...conn, name };
-    persistConns([...conns.filter((x) => x.name !== name), c]);
-    setConn(c);
-    setPickedConn(name);
-  };
+  const [flashMsg, flash] = useFlash();
+
   const deleteConn = () => {
     persistConns(conns.filter((c) => c.name !== pickedConn));
     setPickedConn('');
@@ -493,9 +492,20 @@ export default function PulsarPanel() {
                 <option key={c.name} value={c.name}>{c.name}</option>
               ))}
             </select>
-            <button className="btn-field" onClick={saveConn}>Save</button>
+            <SaveAs
+              canSave={() => (conn.serviceUrl?.trim() ? null : 'Enter a service URL first')}
+              onSave={(name) => {
+                const c = { ...conn, name };
+                persistConns([...conns.filter((x) => x.name !== name), c]);
+                setConn(c);
+                setPickedConn(name);
+                return `Saved "${name}"`;
+              }}
+              onMessage={flash}
+            />
             <button className="btn-field btn-danger" disabled={!pickedConn} onClick={deleteConn}>Delete</button>
           </div>
+          {flashMsg && <div className="toast">{flashMsg}</div>}
           <div className="hint">Shared across every tab in this panel.</div>
 
           <label>Service URL</label>
@@ -678,8 +688,34 @@ export default function PulsarPanel() {
                       <td>{s.msgRateOut}/s</td>
                       <td>{s.lastConsumedTimestamp ? new Date(s.lastConsumedTimestamp).toLocaleString() : '-'}</td>
                       <td className="nowrap">
-                        <button className="btn-field btn-danger" title="Skip the whole backlog for this subscription" onClick={() => skipBacklog(s.name, s.backlog)}>Clear backlog</button>{' '}
-                        <button className="btn-field btn-danger" title="Delete this subscription" onClick={() => deleteSub(s.name)}>Delete</button>
+                        <button
+                          className="btn-field btn-danger"
+                          title={`Skip the whole backlog (${s.backlog} msgs) for "${s.name}" — those messages are never delivered to it`}
+                          onClick={() =>
+                            subAction.isArmed(`skip:${s.name}`)
+                              ? skipBacklog(s.name)
+                              : subAction.arm(`skip:${s.name}`)
+                          }
+                          onMouseLeave={subAction.disarm}
+                          onBlur={subAction.disarm}
+                        >
+                          {subAction.showsArmed(`skip:${s.name}`)
+                            ? `Confirm — skip ${s.backlog}`
+                            : 'Clear backlog'}
+                        </button>{' '}
+                        <button
+                          className="btn-field btn-danger"
+                          title={`Delete subscription "${s.name}" — fails if consumers are still connected`}
+                          onClick={() =>
+                            subAction.isArmed(`del:${s.name}`)
+                              ? deleteSub(s.name)
+                              : subAction.arm(`del:${s.name}`)
+                          }
+                          onMouseLeave={subAction.disarm}
+                          onBlur={subAction.disarm}
+                        >
+                          {subAction.showsArmed(`del:${s.name}`) ? 'Confirm delete' : 'Delete'}
+                        </button>
                       </td>
                     </tr>
                   ))}

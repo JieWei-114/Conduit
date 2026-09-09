@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useFlash } from './useFlash';
+import { SaveAs } from './SaveAs';
 import { rowKeyDown, rowTabIndex } from './rowNav';
 import { useDialog } from './useDialog';
 
@@ -157,6 +159,9 @@ export default function DbPanel() {
     localStorage.setItem(LS_CONNS, JSON.stringify(next));
   };
 
+  const [flashMsg, flash] = useFlash();
+
+
   const loadTables = async () => {
     if (!form.url.trim()) return;
     const tid = active.id; // pin — schema must land on the tab it was requested from
@@ -288,19 +293,18 @@ export default function DbPanel() {
               <option key={c.name} value={c.name}>{c.name}</option>
             ))}
           </select>
-          <button
-            className="btn-field"
-            onClick={() => {
-              if (!form.url.trim()) return;
-              const name = prompt('Name this connection (e.g. local, staging):', '');
-              if (!name) return;
-              persistConns([...conns.filter((c) => c.name !== name), { name, driver: form.driver, url: form.url.trim() }]);
-              setPicked(name);
-            }}
-            title="Save the driver and URL below under a name"
-          >
-            save
-          </button>
+            <SaveAs
+              canSave={() => (form.url.trim() ? null : 'Enter a connection URL first')}
+              onSave={(name) => {
+                persistConns([
+                  ...conns.filter((c) => c.name !== name),
+                  { name, driver: form.driver, url: form.url.trim() },
+                ]);
+                setPicked(name);
+                return `Saved "${name}"`;
+              }}
+              onMessage={flash}
+            />
           <button
             className="btn-field btn-danger"
             title="Delete the selected saved connection"
@@ -313,6 +317,7 @@ export default function DbPanel() {
             delete
           </button>
         </div>
+        {flashMsg && <div className="toast">{flashMsg}</div>}
 
         <div className="row field-row field-row-gap">
           <select

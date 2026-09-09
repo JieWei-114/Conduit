@@ -349,6 +349,11 @@ button:where(.chip, .crumb, .tab, .toptab, .req-tab, .pin, .chip-x, .open-mini,
 .break { word-break: break-all; }
 /* a field row keeps its input(s) and inline buttons on one baseline */
 .field-row { align-items: center; }
+/* A row that must stay on one line: only the .grow field gives up width, so the
+   buttons keep their labels instead of the row reflowing onto a second line. */
+.row-tight { flex-wrap: nowrap; }
+.row-tight > * { flex: none; }
+.row-tight > .grow { flex: 1 1 auto; min-width: var(--w-xs); }
 .field-row-gap { margin-top: var(--s-2); }
 /* connection rows: label+input columns, all bottom-aligned with the ping button */
 .conn-row { display: flex; flex-wrap: wrap; gap: var(--s-2); align-items: flex-end;
@@ -681,12 +686,15 @@ pre {
      scrolls via .panel instead of being clipped */
   .grpc-wrap { height: auto; }
   .grpc-wrap > .layout { height: auto; }
-  /* master-detail: the nav becomes a horizontal scroll bar above the content */
+  /* master-detail: the nav becomes a strip of sections above the content. It
+     wraps onto a second row rather than scrolling, so every section stays
+     visible instead of some sitting past a scroll edge. */
   .navlay {
     grid-template-columns: minmax(0, 1fr); max-width: none; margin: 0;
     border: 0; border-radius: 0; height: auto; max-height: none; box-shadow: none;
   }
-  .navlist { flex-direction: row; overflow-x: auto; border-right: 0;
+  .navlist { flex-direction: row; flex-wrap: wrap; overflow: visible;
+    border-right: 0;
     border-bottom: 1px solid var(--border); padding: var(--s-2); }
   .navitem { flex: 0 0 auto; white-space: nowrap; }
   .navitem.active::before { inset: auto 6px 0 6px; width: auto; height: 2px; top: auto; }

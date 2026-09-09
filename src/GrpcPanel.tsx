@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { SaveAs } from './SaveAs';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
 import { rowKeyDown, rowTabIndex } from './rowNav';
 import type {
@@ -43,6 +44,13 @@ interface FormState {
   body: string;
   /** gateway = gRPC-Web through the gateway; direct = native gRPC to host:port */
   transport: 'gateway' | 'direct';
+  /**
+   * Where the Service/Method list comes from. A gateway needs a descriptor to
+   * encode gRPC-Web, so it is always 'proto'; a direct target can ask the
+   * server itself. Held in state rather than inferred from whether reflection
+   * has returned yet, so the panel changes the moment the transport does.
+   */
+  methodSource: 'proto' | 'reflection';
   targetHost: string;
   targetPort: string;
   plaintext: boolean;
@@ -59,6 +67,7 @@ const DEFAULTS: FormState = {
   extraHeaders: '',
   body: '',
   transport: 'gateway',
+  methodSource: 'proto',
   targetHost: 'localhost',
   targetPort: '50051',
   plaintext: true,
@@ -277,6 +286,15 @@ export default function GrpcPanel() {
   const [reflErr, setReflErr] = useState('');
   const [reflSvcSel, setReflSvcSel] = useState('');
   const [reflMethodSel, setReflMethodSel] = useState('');
+  /** Show the .proto picker instead of the server's own list. */
+  const useProtoInstead = () => {
+    set('methodSource', 'proto');
+    setReflSvcs(null);
+    setReflErr('');
+    setReflSvcSel('');
+    setReflMethodSel('');
+  };
+
   const clearReflect = () => {
     setReflSvcs(null);
     setReflErr('');
@@ -319,6 +337,7 @@ export default function GrpcPanel() {
     });
     if (id === activeId) setActiveId(next[Math.max(0, idx - 1)].id);
   };
+
 
   const flash = (msg: string) => {
     setToast(msg);
@@ -565,15 +584,6 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
     localStorage.setItem(LS_BASES, JSON.stringify(next));
   };
 
-  const saveCurrentBase = () => {
-    const url = form.base.trim().replace(/\/$/, '');
-    if (!url) return;
-    const name = prompt('Name this environment (e.g. local, staging, prod):', '');
-    if (!name) return;
-    persistBases([...savedBases.filter((b) => b.name !== name), { name, url }]);
-    setPickedEnv(name);
-    flash(`Saved "${name}"`);
-  };
 
   const removeBase = (name: string) => {
     persistBases(savedBases.filter((b) => b.name !== name));
@@ -587,7 +597,8 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
   };
   const savePrefix = () => {
     const p = form.prefix.trim();
-    if (!p || savedPrefixes.includes(p)) return;
+    if (!p) return flash('Enter a route prefix first');
+    if (savedPrefixes.includes(p)) return flash(`"${p}" is already saved`);
     persistPrefixes([...savedPrefixes, p].sort());
     flash(`Saved "${p}"`);
   };
@@ -597,17 +608,6 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
   const persistTargets = (next: { name: string; host: string; port: string }[]) => {
     setSavedTargets(next);
     localStorage.setItem(LS_TARGETS, JSON.stringify(next));
-  };
-  const saveTarget = () => {
-    if (!form.targetHost.trim()) return;
-    const name = prompt('Name this target (e.g. local, promotion-pf):', '');
-    if (!name) return;
-    persistTargets([
-      ...savedTargets.filter((t) => t.name !== name),
-      { name, host: form.targetHost.trim(), port: form.targetPort.trim() || '50051' },
-    ]);
-    setPickedTarget(name);
-    flash(`Saved "${name}"`);
   };
   const applyTarget = (name: string) => {
     setPickedTarget(name);
@@ -823,9 +823,19 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
   // ------------------------------------------------------------------- UI --
 
-  // reflection is "driving" once services are loaded in direct mode — the proto
-  // selectors are then hidden to avoid two competing Service/Method pickers.
-  const reflecting = form.transport === 'direct' && !!reflSvcs && reflSvcs.length > 0;
+  /**
+   * Which Service/Method picker is showing.
+   *
+   * A gateway has to encode gRPC-Web from a descriptor, so it is always the
+   * .proto pipeline. A direct target asks the server by default, and can fall
+   * back to .proto for servers with reflection turned off.
+   *
+   * Held in the form so the panel answers the transport choice immediately,
+   * without waiting on a network round trip to decide what to show.
+   */
+  const source: 'proto' | 'reflection' =
+    form.transport === 'gateway' ? 'proto' : form.methodSource;
+  const reflecting = source === 'reflection';
 
   return (
     <div className="grpc-wrap">
@@ -886,83 +896,26 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           gRPC <span className="badge">{reflecting ? 'reflection' : 'proto files'}</span>
         </h3>
 
-        {reflecting && (
-          <div className="inline mt-2">
-            <span className="hint">driven by server reflection — proto selection hidden</span>
-            <button className="btn-ghost" onClick={clearReflect}>use .proto instead</button>
-          </div>
-        )}
-
-        {!reflecting && (
-          <>
-            <label>Proto repo</label>
-            <input
-              value={form.root}
-              spellCheck={false}
-              onChange={(e) => set('root', e.target.value)}
-            />
-            <div className="hint">directory scanned for .proto files</div>
-            {rootError && <div className="error">{rootError}</div>}
-
-            <label>
-              Proto file{' '}
-              <span className="count">
-                ({filteredProtos.length}/{protos.length})
-              </span>
-            </label>
-            <input
-              className="mb4"
-              placeholder="filter"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-            <select value={form.proto} onChange={(e) => set('proto', e.target.value)}>
-              {filteredProtos.map((p) => (
-                <option key={p}>{p}</option>
-              ))}
-            </select>
-
-            <label>Service / Method</label>
-            <input
-              className="mb4"
-              placeholder="filter methods"
-              value={methodFilter}
-              onChange={(e) => setMethodFilter(e.target.value)}
-            />
-            <select
-              value={form.rpc}
-              onChange={(e) => {
-                set('rpc', e.target.value);
-                set('urlOverride', '');
-              }}
-            >
-              {info?.services.flatMap((s) =>
-                s.rpcs
-                  .filter((r) =>
-                    methodFilter
-                      ? `${s.service}/${r.method}`
-                          .toLowerCase()
-                          .includes(methodFilter.toLowerCase())
-                      : true,
-                  )
-                  .map((r) => {
-                    const v = `${s.service}/${r.method}`;
-                    return <option key={v}>{v}</option>;
-                  }),
-              )}
-            </select>
-          </>
-        )}
-
         {/* transport: same proto/body pipeline, different wire */}
         <label>Send via</label>
         <select
           value={form.transport}
-          onChange={(e) => set('transport', e.target.value as FormState['transport'])}
+          onChange={(e) => {
+            const t = e.target.value as FormState['transport'];
+            setActiveForm((f) => ({
+              ...f,
+              transport: t,
+              // A gateway can only work from a descriptor; a direct target asks
+              // the server unless told otherwise.
+              methodSource: t === 'gateway' ? 'proto' : 'reflection',
+            }));
+          }}
         >
           <option value="gateway">Gateway (gRPC-Web) — like the frontend</option>
           <option value="direct">Direct (native gRPC to host:port)</option>
         </select>
+
+
         {form.transport === 'direct' && (
           <>
             <div className="row field-row field-row-gap">
@@ -972,7 +925,18 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                   <option key={t.name} value={t.name}>{t.name}</option>
                 ))}
               </select>
-              <button className="btn-field" onClick={saveTarget}>save</button>
+              <SaveAs
+                canSave={() => (form.targetHost.trim() ? null : 'Enter a host first')}
+                onSave={(name) => {
+                  persistTargets([
+                    ...savedTargets.filter((t) => t.name !== name),
+                    { name, host: form.targetHost.trim(), port: form.targetPort.trim() || '50051' },
+                  ]);
+                  setPickedTarget(name);
+                  return `Saved "${name}"`;
+                }}
+                onMessage={flash}
+              />
               <button className="btn-field btn-danger" disabled={!pickedTarget} onClick={deleteTarget}>
                 delete
               </button>
@@ -1020,7 +984,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
             {reflSvcs && reflSvcs.length === 0 && (
               <div className="inline mt-1">
                 <span className="hint">no user services exposed via reflection</span>
-                <button className="btn-ghost" onClick={clearReflect}>back</button>
+                <button className="btn-ghost" onClick={useProtoInstead}>use .proto instead</button>
               </div>
             )}
             {reflSvcs && reflSvcs.length > 0 && (
@@ -1103,7 +1067,18 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
               <option key={b.name} value={b.name}>{b.name}</option>
             ))}
           </select>
-          <button className="btn-field" onClick={saveCurrentBase}>save</button>
+          <SaveAs
+            canSave={() => (form.base.trim() ? null : 'Enter a base URL first')}
+            onSave={(name) => {
+              persistBases([
+                ...savedBases.filter((b) => b.name !== name),
+                { name, url: form.base.trim().replace(/\/$/, '') },
+              ]);
+              setPickedEnv(name);
+              return `Saved "${name}"`;
+            }}
+            onMessage={flash}
+          />
         </div>
         <div className="row field-row field-row-gap">
           <input
@@ -1126,24 +1101,13 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
         <label>Route prefix</label>
         <div className="hint mb-1">gateway path inserted before the gRPC path</div>
-        <div className="row field-row">
-          <select
-            className="max-md"
-            value={savedPrefixes.includes(form.prefix) ? form.prefix : ''}
-            onChange={(e) => {
-              if (e.target.value) {
-                set('prefix', e.target.value);
-                set('urlOverride', '');
-              }
-            }}
-          >
-            <option value=""> - </option>
-            {savedPrefixes.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
+        {/* A prefix is its own name, so the saved list belongs on the field as a
+            datalist rather than in a second picker beside it. One field instead
+            of two keeps the row on one line in a narrow panel. */}
+        <div className="row field-row row-tight">
           <input
             className="grow"
+            list="grpc-prefixes"
             value={form.prefix}
             spellCheck={false}
             placeholder="/myservice"
@@ -1152,6 +1116,11 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
               set('urlOverride', '');
             }}
           />
+          <datalist id="grpc-prefixes">
+            {savedPrefixes.map((p) => (
+              <option key={p} value={p} />
+            ))}
+          </datalist>
           <button className="btn-field" onClick={savePrefix}>save</button>
           <button
             className="btn-field btn-danger"
@@ -1162,10 +1131,85 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           </button>
         </div>
 
-        <label>Full URL</label>
-        <input value={url} onChange={(e) => set('urlOverride', e.target.value)} />
-        <div className="hint">built from base + prefix + gRPC path · edit to override</div>
         </>
+        )}
+
+        {reflecting && (
+          <div className="inline mt-2">
+            <span className="hint">driven by server reflection — proto selection hidden</span>
+            <button className="btn-ghost" onClick={useProtoInstead}>use .proto instead</button>
+          </div>
+        )}
+        {!reflecting && (
+          <>
+            <label>Proto repo</label>
+            <input
+              value={form.root}
+              spellCheck={false}
+              onChange={(e) => set('root', e.target.value)}
+            />
+            <div className="hint">directory scanned for .proto files</div>
+            {rootError && <div className="error">{rootError}</div>}
+
+            <label>
+              Proto file{' '}
+              <span className="count">
+                ({filteredProtos.length}/{protos.length})
+              </span>
+            </label>
+            <input
+              className="mb4"
+              placeholder="filter"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+            <select value={form.proto} onChange={(e) => set('proto', e.target.value)}>
+              {filteredProtos.map((p) => (
+                <option key={p}>{p}</option>
+              ))}
+            </select>
+
+            <label>Service / Method</label>
+            <input
+              className="mb4"
+              placeholder="filter methods"
+              value={methodFilter}
+              onChange={(e) => setMethodFilter(e.target.value)}
+            />
+            <select
+              value={form.rpc}
+              onChange={(e) => {
+                set('rpc', e.target.value);
+                set('urlOverride', '');
+              }}
+            >
+              {info?.services.flatMap((s) =>
+                s.rpcs
+                  .filter((r) =>
+                    methodFilter
+                      ? `${s.service}/${r.method}`
+                          .toLowerCase()
+                          .includes(methodFilter.toLowerCase())
+                      : true,
+                  )
+                  .map((r) => {
+                    const v = `${s.service}/${r.method}`;
+                    return <option key={v}>{v}</option>;
+                  }),
+              )}
+            </select>
+          </>
+        )}
+        {/* Built from base + prefix + the selected method, so it belongs after
+            them: shown above its own inputs, picking a method changes a field
+            that has already scrolled out of view. Gateway only — a direct
+            target is a host and port, not a URL. */}
+        {form.transport === 'gateway' && (
+          <>
+            <label>Full URL</label>
+            <input value={url} onChange={(e) => set('urlOverride', e.target.value)} />
+            <div className="hint">built from base + prefix + gRPC path · edit to override</div>
+          </>
         )}
 
         <AuthBox value={form.auth} onChange={(a) => set('auth', a)} />

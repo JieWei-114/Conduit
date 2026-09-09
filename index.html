@@ -4,6 +4,9 @@
   <meta charset="utf-8" />
   <title>Conduit</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Inline so the browser host has no /favicon.ico to probe for. The Tauri
+       window takes its icon from src-tauri/icons instead. -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23000'/%3E%3Ctext x='16' y='23' font-family='Helvetica,Arial,sans-serif' font-size='21' font-weight='700' fill='%23f5c33c' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E" />
   <script>
     // Runs before first paint so a saved theme does not flash the other scheme
     // on the way in. The app reapplies it on mount from the same key.

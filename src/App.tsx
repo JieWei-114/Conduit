@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useArmedConfirm } from './useArmedConfirm';
 import GrpcPanel from './GrpcPanel';
 import HttpPanel from './HttpPanel';
 import RedisPanel from './RedisPanel';
@@ -85,8 +86,9 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  const reset = useArmedConfirm();
+
   const resetAll = async () => {
-    if (!confirm('Clear ALL saved data (connections, history, forms)?')) return;
     localStorage.clear();
     await fetch('/api/store', { method: 'DELETE' }).catch(() => {});
     location.reload();
@@ -118,8 +120,22 @@ export default function App() {
             {t.label}
           </span>
         ))}
-        <span className="toptab reset-all" title="Clear all saved data" onClick={resetAll}>
-          reset data
+        <span
+          className="toptab reset-all"
+          role="button"
+          tabIndex={0}
+          title="Clear every saved connection, request and form in the app"
+          onClick={() => (reset.isArmed('all') ? resetAll() : reset.arm('all'))}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              reset.isArmed('all') ? resetAll() : reset.arm('all');
+            }
+          }}
+          onMouseLeave={reset.disarm}
+          onBlur={reset.disarm}
+        >
+          {reset.showsArmed('all') ? 'confirm reset — erases everything' : 'reset data'}
         </span>
         <div className="theme-seg" role="group" aria-label="Theme">
           {THEMES.map((t) => (

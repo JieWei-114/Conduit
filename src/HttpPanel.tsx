@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useFlash } from './useFlash';
+import { SaveAs } from './SaveAs';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
 import JsonTree from './JsonTree';
 import { rowKeyDown, rowTabIndex } from './rowNav';
@@ -338,21 +340,27 @@ export default function HttpPanel() {
     setSaved(next);
     localStorage.setItem(LS_SAVED, JSON.stringify(next));
   };
-  const saveRequest = () => {
-    if (!form.url.trim()) return;
-    const name = prompt('Name this request:', pickedSaved || form.url.replace(/^https?:\/\//, '').slice(0, 40));
-    if (!name) return;
-    persistSaved([...saved.filter((s) => s.name !== name), { name, form }]);
-    setPickedSaved(name);
-  };
+  const [flashMsg, flash] = useFlash();
+
+
+  /**
+   * A cURL command is multi-line and long, so it is pasted into a field rather
+   * than a single-line dialog, and the outcome is reported in the same place
+   * every other outcome in this panel is.
+   */
+  const [curlOpen, setCurlOpen] = useState(false);
+  const [curlText, setCurlText] = useState('');
 
   const importCurl = () => {
-    const text = prompt('Paste a cURL command:');
-    if (!text) return;
+    const text = curlText.trim();
+    if (!text) return flash('Paste a cURL command first');
     const parsed = parseCurl(text);
-    if (!parsed) return alert('No cURL command found in the pasted text.');
-    if ('error' in parsed) return alert(parsed.error);
+    if (!parsed) return flash('No cURL command found in that text');
+    if ('error' in parsed) return flash(parsed.error);
     setForm((f) => hydrate({ ...f, ...parsed }));
+    setCurlText('');
+    setCurlOpen(false);
+    flash('Request filled from cURL');
   };
   const exportCurl = () => {
     const lines = [`curl -X ${form.method} '${fullUrl}'`];
@@ -461,7 +469,15 @@ export default function HttpPanel() {
               <option key={s.name} value={s.name}>{s.name}</option>
             ))}
           </select>
-          <button className="btn-field" title="Save the current request under a name" onClick={saveRequest}>save</button>
+          <SaveAs
+            canSave={() => (form.url.trim() ? null : 'Enter a URL first')}
+            onSave={(name) => {
+              persistSaved([...saved.filter((s) => s.name !== name), { name, form }]);
+              setPickedSaved(name);
+              return `Saved "${name}"`;
+            }}
+            onMessage={flash}
+          />
           <button
             className="btn-field btn-danger"
             title="Delete the selected saved request"
@@ -474,14 +490,39 @@ export default function HttpPanel() {
             delete
           </button>
         </div>
+        {flashMsg && <div className="toast">{flashMsg}</div>}
         <div className="inline mt-2">
-          <button className="btn-secondary" title="Fill this request from a pasted cURL command" onClick={importCurl}>
+          <button
+            className="btn-secondary"
+            title="Fill this request from a pasted cURL command"
+            onClick={() => setCurlOpen((o) => !o)}
+          >
             import cURL
           </button>
           <button className="btn-secondary" title="Copy this request to the clipboard as a cURL command" onClick={exportCurl}>
             copy as cURL
           </button>
         </div>
+        {curlOpen && (
+          <>
+            <textarea
+              className="mt-2"
+              rows={4}
+              spellCheck={false}
+              placeholder="curl 'https://api.example.com/v1/things' -H 'authorization: Bearer …'"
+              value={curlText}
+              onChange={(e) => setCurlText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) importCurl(); }}
+            />
+            <div className="inline mt-2">
+              <button className="btn-field" onClick={importCurl}>fill from cURL</button>
+              <button className="btn-ghost" onClick={() => { setCurlOpen(false); setCurlText(''); }}>
+                cancel
+              </button>
+              <span className="hint">paste the whole command · ⌘/Ctrl+Enter to fill</span>
+            </div>
+          </>
+        )}
 
         <label>Request</label>
         <div className="row field-row">
@@ -547,7 +588,7 @@ export default function HttpPanel() {
                 const items: FileItem[] = [];
                 for (const f of picked) {
                   if (f.size > 25 * 1024 * 1024) {
-                    alert(`"${f.name}" is ${(f.size / 1048576).toFixed(1)}MB — over the 25MB upload limit.`);
+                    flash(`"${f.name}" is ${(f.size / 1048576).toFixed(1)}MB — over the 25MB limit`);
                     continue;
                   }
                   // chunked base64 — avoids stack overflow on big files

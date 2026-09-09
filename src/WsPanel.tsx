@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useFlash } from './useFlash';
+import { SaveAs } from './SaveAs';
 
 const LS_TABS = 'conduit.ws.tabs.v1';
 const LS_FORM = 'conduit.ws.form.v1'; // legacy single-form (migrated)
@@ -191,6 +193,9 @@ export default function WsPanel() {
     localStorage.setItem(LS_SAVED, JSON.stringify(next));
   };
 
+  const [flashMsg, flash] = useFlash();
+
+
   // ── tabs ─────────────────────────────────────────────────────────────────
   const tabLabel = (t: WTab) => {
     const host = t.form.url.replace(/^(wss?|https?):\/\//, '').split(/[/?]/)[0] || t.form.mode;
@@ -324,22 +329,20 @@ export default function WsPanel() {
                 <option key={s.name} value={s.name}>{s.name}</option>
               ))}
             </select>
-            <button
-              className="btn-field"
-              onClick={() => {
-                if (!form.url.trim()) return;
-                const name = prompt('Name this connection:', '');
-                if (!name) return;
+            <SaveAs
+              canSave={() => (form.url.trim() ? null : 'Enter a URL first')}
+              onSave={(name) => {
                 persistSaved([...saved.filter((s) => s.name !== name), { name, form }]);
                 setPicked(name);
+                return `Saved "${name}"`;
               }}
-            >
-              Save
-            </button>
+              onMessage={flash}
+            />
             <button className="btn-field btn-danger" disabled={!picked} onClick={() => { persistSaved(saved.filter((s) => s.name !== picked)); setPicked(''); }}>
               Delete
             </button>
           </div>
+          {flashMsg && <div className="toast">{flashMsg}</div>}
 
           <label>URL</label>
           <div className="row field-row">

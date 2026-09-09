@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { useFlash } from './useFlash';
+import { SaveAs } from './SaveAs';
 
 const LS_CONN = 'conduit.kafka.conn.v1';
 const LS_CONNS = 'conduit.kafka.conns.v1';
@@ -126,6 +128,9 @@ export default function KafkaPanel() {
     setConns(next);
     localStorage.setItem(LS_CONNS, JSON.stringify(next));
   };
+
+  const [flashMsg, flash] = useFlash();
+
   const cfg = () => ({ brokers: conn.brokers.trim(), ssl: conn.ssl, saslUser: conn.saslUser, saslPass: conn.saslPass });
 
   const listTopics = async () => {
@@ -320,21 +325,20 @@ export default function KafkaPanel() {
                 <option key={c.name} value={c.name}>{c.name}</option>
               ))}
             </select>
-            <button
-              className="btn-field"
-              onClick={() => {
-                const name = prompt('Name this connection (e.g. local, staging):', '');
-                if (!name) return;
+            <SaveAs
+              canSave={() => (conn.brokers.trim() ? null : 'Enter at least one broker first')}
+              onSave={(name) => {
                 persistConns([...conns.filter((c) => c.name !== name), { name, ...cfg() }]);
                 setPicked(name);
+                return `Saved "${name}"`;
               }}
-            >
-              Save
-            </button>
+              onMessage={flash}
+            />
             <button className="btn-field btn-danger" disabled={!picked} onClick={() => { persistConns(conns.filter((c) => c.name !== picked)); setPicked(''); }}>
               Delete
             </button>
           </div>
+          {flashMsg && <div className="toast">{flashMsg}</div>}
           <div className="hint">Shared across every tab in this panel.</div>
 
           <label>Brokers</label>
