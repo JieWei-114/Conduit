@@ -119,10 +119,15 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
                     }
                 }
                 Ok(TMessage::Binary(b)) => {
+                    // base64, not a placeholder: the envelope is JSON and the
+                    // bytes need not be valid UTF-8, but the caller still has to
+                    // be able to read them (Socket.IO binary attachments, say).
                     let env = json!({
                         "kind": "message",
                         "at": chrono::Utc::now().to_rfc3339(),
-                        "data": format!("[binary {} bytes]", b.len()),
+                        "encoding": "base64",
+                        "bytes": b.len(),
+                        "data": base64::engine::general_purpose::STANDARD.encode(&b),
                     });
                     if cl_tx.send(Message::Text(env.to_string())).await.is_err() {
                         break;
@@ -170,9 +175,10 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
                         break;
                     }
                 }
+                // Relayed as binary rather than lossily stringified: bytes the
+                // browser sends as binary are meant to reach the server as bytes.
                 Ok(Message::Binary(b)) => {
-                    let s = String::from_utf8_lossy(&b).to_string();
-                    if up_tx.send(TMessage::Text(s)).await.is_err() {
+                    if up_tx.send(TMessage::Binary(b)).await.is_err() {
                         break;
                     }
                 }

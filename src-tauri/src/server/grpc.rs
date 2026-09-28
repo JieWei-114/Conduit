@@ -834,10 +834,25 @@ async fn config() -> Json<Value> {
     Json(json!({ "defaultRoot": DEFAULT_ROOT.as_str() }))
 }
 
+/* The scan is a synchronous directory walk, so it runs on a blocking thread.
+   Run directly, a wide root (`/` reaches a great deal at depth 8) holds a
+   runtime worker for minutes, and enough of those stall the whole server —
+   every other request queues behind it, WebSocket upgrades included. */
 async fn protos(Query(q): Query<RootQuery>) -> Json<Value> {
-    match resolve_root(q.root.as_deref()) {
-        Ok(root) => Json(json!({ "ok": true, "root": root.to_string_lossy(), "protos": list_protos(&root) })),
-        Err(e) => Json(json!({ "error": e })),
+    let root = match resolve_root(q.root.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return Json(json!({ "error": e })),
+    };
+    match tokio::task::spawn_blocking(move || {
+        let found = list_protos(&root);
+        (root, found)
+    })
+    .await
+    {
+        Ok((root, found)) => {
+            Json(json!({ "ok": true, "root": root.to_string_lossy(), "protos": found }))
+        }
+        Err(e) => Json(json!({ "error": format!("proto scan failed: {e}") })),
     }
 }
 
@@ -846,9 +861,14 @@ async fn inspect(Query(q): Query<InspectQuery>) -> Json<Value> {
         Some(p) if !p.is_empty() => p,
         _ => return Json(json!({ "error": "missing ?proto=" })),
     };
-    match resolve_root(q.root.as_deref()) {
-        Ok(root) => Json(serde_json::to_value(inspect_proto(&root, &rel)).unwrap_or(json!({}))),
-        Err(e) => Json(json!({ "error": e })),
+    let root = match resolve_root(q.root.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return Json(json!({ "error": e })),
+    };
+    // Parsing a descriptor is blocking work too, for the same reason.
+    match tokio::task::spawn_blocking(move || inspect_proto(&root, &rel)).await {
+        Ok(info) => Json(serde_json::to_value(info).unwrap_or(json!({}))),
+        Err(e) => Json(json!({ "error": format!("proto inspect failed: {e}") })),
     }
 }
 

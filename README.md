@@ -12,7 +12,7 @@ Postman for the things Postman is awkward at.
 | **HTTP** | REST client proxied server-side (no CORS): query params, Auth (Bearer/Basic/Raw/OAuth2), body (JSON/raw/form/multipart), cURL import/export, saved requests, JSON-tree responses. |
 | **DB** | PostgreSQL / MySQL / MongoDB / ClickHouse — SQL (or JSON for Mongo), schema browser, query history, CSV/JSON export. |
 | **Redis** | Prefix drill-down browser, type-aware value editor, batch command runner, PUBLISH/SUBSCRIBE live feed, INFO dashboard, key export. |
-| **WS/SSE** | Connect to a WebSocket (custom headers/subprotocols via proxy) or consume a Server-Sent-Events stream. Each tab is an independent live connection. |
+| **WS/SSE** | Connect to a raw WebSocket (custom headers/subprotocols via proxy), speak Socket.IO to a Socket.IO server, or consume a Server-Sent-Events stream. Each tab is an independent live connection. |
 | **Pulsar** | Produce/consume over the broker plus admin API (topics, stats, subscriptions, peek). |
 | **Kafka** | Produce (key/headers/value) and consume (rdkafka, SASL/SSL), with topic listing. |
 | **Webhook** | Turns conduit into a receiver: point any caller at your capture URL and watch inbound requests stream in live, with a configurable canned response. |
@@ -123,11 +123,22 @@ PSUBSCRIBE).
 
 ### WS/SSE
 
-Toggle **WebSocket** or **SSE** (top-right). WebSocket connects through the
-server's proxy so you can set headers and subprotocols the browser would
-otherwise forbid; SSE consumes any `text/event-stream` endpoint (receive-only,
-default `message` events). Each tab is an independent connection with its own feed
-and filter.
+Toggle **WebSocket**, **Socket.IO** or **SSE**. All three share the saved
+connections, the tabs, the feed and its filter.
+
+**WebSocket** connects through the server's proxy, so you can set headers and
+subprotocols the browser would otherwise forbid. **Socket.IO** rides the same
+proxy and adds the Engine.IO v4 framing on top: it performs the handshake,
+answers the server's heartbeat, joins a namespace and emits named events with a
+JSON argument. Auth can travel either in the handshake query or in the CONNECT
+packet, since servers differ on where they read it; the raw frames stay visible
+in the feed, which is what tells you how far a failing connection got.
+**SSE** consumes any `text/event-stream` endpoint (receive-only, default
+`message` events).
+
+Socket.IO connects straight over WebSocket rather than starting with the
+HTTP long-polling handshake, which works against a server that allows the
+WebSocket transport — the usual default.
 
 ### Pulsar
 

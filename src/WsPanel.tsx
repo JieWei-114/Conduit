@@ -6,13 +6,41 @@ const LS_TABS = 'conduit.ws.tabs.v1';
 const LS_FORM = 'conduit.ws.form.v1'; // legacy single-form (migrated)
 const LS_SAVED = 'conduit.ws.saved.v1';
 
+/**
+ * Socket.IO rides on a WebSocket, so it lives here as a third mode rather than
+ * in a panel of its own: same proxy, same saved connections, same tabs, same
+ * message feed. Only the framing differs, and only the `sio*` fields below.
+ *
+ * Wire format (one text frame each):
+ *   engine.io  0{...}=open  1=close  2=ping  3=pong  4<sio>=message
+ *   socket.io  0=CONNECT 1=DISCONNECT 2=EVENT 3=ACK 4=CONNECT_ERROR
+ *   connect    40[/ns,][authJSON]        event  42[/ns,][ackId]["name",arg]
+ * The server pings, we pong; without that it drops the connection.
+ */
 interface WsForm {
-  mode: 'ws' | 'sse';
+  mode: 'ws' | 'sio' | 'sse';
   url: string;
   headers: string; // k: v per line (Authorization etc.)
   protocols: string; // comma-separated subprotocols
+  sioPath: string; // socket.io mount path
+  sioNamespace: string; // socket.io namespace
+  sioQuery: string; // extra handshake query string
+  sioAuth: string; // JSON carried in the CONNECT packet
+  sioEvent: string; // event name to emit
+  sioPayload: string; // JSON argument to emit with it
 }
-const DEFAULTS: WsForm = { mode: 'ws', url: 'wss://', headers: '', protocols: '' };
+const DEFAULTS: WsForm = {
+  mode: 'ws',
+  url: 'wss://',
+  headers: '',
+  protocols: '',
+  sioPath: '/socket.io',
+  sioNamespace: '/',
+  sioQuery: '',
+  sioAuth: '',
+  sioEvent: '',
+  sioPayload: '{}',
+};
 
 interface WTab { id: number; form: WsForm }
 interface Msg { id: number; dir: 'in' | 'out' | 'sys'; at: string; text: string }
@@ -26,6 +54,13 @@ function tryJson(s: string): string | null {
   } catch {
     return null;
   }
+}
+/* A binary frame arrives base64-encoded with its byte count, because the wire
+   is JSON and the bytes are not guaranteed to be valid UTF-8. Label it so the
+   feed cannot be mistaken for text the server actually sent. */
+function frameText(env: { data?: unknown; encoding?: string; bytes?: number }): string {
+  const data = String(env.data ?? '');
+  return env.encoding === 'base64' ? `[binary ${env.bytes ?? 0} bytes, base64]\n${data}` : data;
 }
 function loadJson<T>(key: string, fb: T): T {
   try {
@@ -100,6 +135,70 @@ export default function WsPanel() {
     return h;
   };
 
+  /* Socket.IO's own handshake URL. The path falls back only when it is blank
+     after trimming the slashes off — `'/' + ''` is still truthy, so a plain
+     `||` fallback would let an empty path through as `//`. */
+  const sioTarget = (f: WsForm): string | null => {
+    let u = f.url.trim();
+    if (!u) return null;
+    u = u.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+    // A host is required, not just a scheme: trimming trailing slashes off a
+    // bare "wss://" would otherwise yield "wss:" and a malformed target.
+    if (!/^wss?:\/\/[^/?#]+/i.test(u)) return null;
+    u = u.replace(/\/+$/, '');
+    const trimmed = f.sioPath.trim().replace(/^\/+|\/+$/g, '');
+    const path = trimmed ? `/${trimmed}` : '/socket.io';
+    const extra = f.sioQuery.trim() ? `&${f.sioQuery.trim().replace(/^[?&]/, '')}` : '';
+    return `${u}${path}/?EIO=4&transport=websocket${extra}`;
+  };
+
+  /** "/ns," for a real namespace, empty for the default one. */
+  const nsPrefix = (f: WsForm) => {
+    const ns = f.sioNamespace.trim();
+    return ns && ns !== '/' ? `${ns.startsWith('/') ? ns : `/${ns}`},` : '';
+  };
+
+  /* A Socket.IO connection is live only once the server acks CONNECT, so the
+     proxy opening is not enough — `live` gates Emit, and emitting before the
+     ack is dropped by the server. */
+  const handleSio = (id: number, f: WsForm, ws: WebSocket, raw: string) => {
+    if (!raw) return;
+    const at = () => new Date().toISOString();
+    const send = (frame: string) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(frame);
+    };
+    const engine = raw[0];
+    if (engine === '0') {
+      push(id, { dir: 'sys', at: at(), text: '● engine.io open' });
+      send(`40${nsPrefix(f)}${f.sioAuth.trim()}`);
+      return;
+    }
+    if (engine === '2') return send('3'); // ping → pong
+    if (engine === '1') return push(id, { dir: 'sys', at: at(), text: '● engine.io close' });
+    if (engine !== '4') return;
+
+    const packet = raw.slice(1);
+    const type = packet[0];
+    let rest = packet.slice(1);
+    if (rest.startsWith('/')) {
+      const comma = rest.indexOf(',');
+      if (comma >= 0) rest = rest.slice(comma + 1);
+    }
+    if (type === '0') {
+      setSt(id, { s: 'live' });
+      push(id, { dir: 'sys', at: at(), text: '✔ connected (Socket.IO)' });
+    } else if (type === '1') {
+      push(id, { dir: 'sys', at: at(), text: '● disconnected by server' });
+    } else if (type === '4') {
+      setSt(id, { s: 'error', msg: 'connect_error' });
+      push(id, { dir: 'in', at: at(), text: `connect_error ${rest}` });
+    } else if (type === '2' || type === '3') {
+      // EVENT or ACK: drop a leading ack id, keep the JSON array for the feed
+      const m = rest.match(/^(\d+)?([[{][\s\S]*)$/);
+      push(id, { dir: 'in', at: at(), text: m ? m[2] : rest });
+    }
+  };
+
   const disconnect = (id: number) => {
     wsRefs.current.get(id)?.close();
     wsRefs.current.delete(id);
@@ -131,12 +230,19 @@ export default function WsPanel() {
   };
 
   const connectWs = (id: number, f: WsForm) => {
-    if (!/^wss?:\/\//i.test(f.url.trim())) {
-      setSt(id, { s: 'error', msg: 'URL must start with ws:// or wss://' });
+    const sio = f.mode === 'sio';
+    const target = sio ? sioTarget(f) : f.url.trim();
+    if (!target || (!sio && !/^wss?:\/\//i.test(target))) {
+      setSt(id, {
+        s: 'error',
+        msg: sio
+          ? 'URL must start with http://, https://, ws:// or wss://'
+          : 'URL must start with ws:// or wss://',
+      });
       return;
     }
     const q = new URLSearchParams({
-      target: f.url.trim(),
+      target,
       headers: btoa(unescape(encodeURIComponent(JSON.stringify(headersObj(f))))),
       ...(f.protocols.trim() ? { protocols: f.protocols.trim() } : {}),
     });
@@ -146,8 +252,20 @@ export default function WsPanel() {
     ws.onmessage = (e) => {
       let env: any;
       try { env = JSON.parse(e.data); } catch { return; }
-      if (env.kind === 'open') { setSt(id, { s: 'live' }); push(id, { dir: 'sys', at: new Date().toISOString(), text: '● connected' }); }
-      else if (env.kind === 'message') push(id, { dir: 'in', at: env.at, text: env.data });
+      if (env.kind === 'open') {
+        // For Socket.IO the proxy being open is only the transport; `live`
+        // waits for the CONNECT ack in handleSio.
+        push(id, { dir: 'sys', at: new Date().toISOString(), text: sio ? '● proxy connected' : '● connected' });
+        if (!sio) setSt(id, { s: 'live' });
+      }
+      else if (env.kind === 'message') {
+        // A binary frame is never engine.io framing — it is a Socket.IO
+        // attachment — so it goes straight to the feed in both modes rather
+        // than through handleSio, which would read base64 as a frame type.
+        if (env.encoding === 'base64') push(id, { dir: 'in', at: env.at, text: frameText(env) });
+        else if (sio) handleSio(id, f, ws, String(env.data ?? ''));
+        else push(id, { dir: 'in', at: env.at, text: frameText(env) });
+      }
       else if (env.kind === 'close') {
         setSt(id, { s: 'idle', msg: `closed ${env.code}` });
         push(id, { dir: 'sys', at: new Date().toISOString(), text: `● closed ${env.code} ${env.reason ?? ''}` });
@@ -188,12 +306,38 @@ export default function WsPanel() {
     setOutboxMap((m) => ({ ...m, [id]: '' }));
   };
 
+  /* Every refusal names its reason. An Emit that quietly does nothing is
+     indistinguishable from a broken button. */
+  const emitEvent = (id: number) => {
+    const f = tabs.find((t) => t.id === id)?.form;
+    if (!f) return;
+    const ws = wsRefs.current.get(id);
+    if (ws?.readyState !== WebSocket.OPEN) return flashEmit('Connect first');
+    const name = f.sioEvent.trim();
+    if (!name) return flashEmit('Enter an event name first');
+    let arg: unknown = {};
+    const raw = f.sioPayload.trim();
+    if (raw) {
+      try {
+        arg = JSON.parse(raw);
+      } catch {
+        return flashEmit('Payload is not valid JSON');
+      }
+    }
+    const body = JSON.stringify([name, arg]);
+    ws.send(`42${nsPrefix(f)}${body}`);
+    push(id, { dir: 'out', at: new Date().toISOString(), text: body });
+  };
+
   const persistSaved = (next: { name: string; form: WsForm }[]) => {
     setSaved(next);
     localStorage.setItem(LS_SAVED, JSON.stringify(next));
   };
 
   const [flashMsg, flash] = useFlash();
+  // The Emit button sits in the right column; its refusals belong there,
+  // not under the saved-connection row on the left.
+  const [emitMsg, flashEmit] = useFlash();
 
 
   // ── tabs ─────────────────────────────────────────────────────────────────
@@ -220,6 +364,7 @@ export default function WsPanel() {
   };
 
   const sse = form.mode === 'sse';
+  const sio = form.mode === 'sio';
   const st = stateMap[active.id] ?? { s: 'idle' as const };
   const live = st.s === 'live';
   const connState = st.s;
@@ -240,7 +385,7 @@ export default function WsPanel() {
           : `Disconnected${st.msg ? ` · ${st.msg}` : ''}`;
   const connCls = connState === 'live' ? 'status ok' : connState === 'error' ? 'status bad' : 'status';
 
-  const switchMode = (mode: 'ws' | 'sse') => {
+  const switchMode = (mode: WsForm['mode']) => {
     if (!editable) disconnect(active.id);
     set('mode', mode);
   };
@@ -296,10 +441,15 @@ export default function WsPanel() {
       <div className="layout">
         <div className="left">
           <h3>
-            {sse ? 'SSE' : 'WebSocket'} <span className="badge">live stream</span>
+            {sse ? 'SSE' : sio ? 'Socket.IO' : 'WebSocket'}{' '}
+            <span className="badge">live stream</span>
           </h3>
           <div className="tabs" role="tablist" aria-label="Transport">
-            {(['ws', 'sse'] as const).map((m) => (
+            {([
+              ['ws', 'WebSocket'],
+              ['sio', 'Socket.IO'],
+              ['sse', 'SSE'],
+            ] as const).map(([m, label]) => (
               <button
                 type="button"
                 key={m}
@@ -308,7 +458,7 @@ export default function WsPanel() {
                 aria-selected={form.mode === m}
                 onClick={() => switchMode(m)}
               >
-                {m === 'ws' ? 'WebSocket' : 'SSE'}
+                {label}
               </button>
             ))}
           </div>
@@ -350,7 +500,7 @@ export default function WsPanel() {
               className="grow"
               value={form.url}
               spellCheck={false}
-              placeholder={sse ? 'https://host/events' : 'wss://host/path'}
+              placeholder={sse ? 'https://host/events' : sio ? 'http://host:3000' : 'wss://host/path'}
               disabled={!editable}
               onChange={(e) => set('url', e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && connect(active.id)}
@@ -359,13 +509,63 @@ export default function WsPanel() {
               {live || connState === 'connecting' ? 'Disconnect' : 'Connect'}
             </button>
           </div>
-          <div className="hint">{sse ? 'http:// or https://' : 'ws:// or wss://'}</div>
+          <div className="hint">
+            {sse
+              ? 'http:// or https://'
+              : sio
+                ? 'the server root — the handshake path below is appended'
+                : 'ws:// or wss://'}
+          </div>
+
+          {sio && (
+            <>
+              <label>Path</label>
+              <input
+                value={form.sioPath}
+                spellCheck={false}
+                placeholder="/socket.io"
+                disabled={!editable}
+                onChange={(e) => set('sioPath', e.target.value)}
+              />
+              <div className="hint">where Socket.IO is mounted on the server</div>
+
+              <label>Namespace</label>
+              <input
+                value={form.sioNamespace}
+                spellCheck={false}
+                placeholder="/"
+                disabled={!editable}
+                onChange={(e) => set('sioNamespace', e.target.value)}
+              />
+              <div className="hint">sent in the CONNECT packet · leave as / for the default</div>
+
+              <label>Handshake query</label>
+              <input
+                value={form.sioQuery}
+                spellCheck={false}
+                placeholder="token=abc&room=1"
+                disabled={!editable}
+                onChange={(e) => set('sioQuery', e.target.value)}
+              />
+              <div className="hint">appended to the handshake URL · for servers that read auth there</div>
+
+              <label>Auth JSON</label>
+              <input
+                value={form.sioAuth}
+                spellCheck={false}
+                placeholder={'{"token":"…"}'}
+                disabled={!editable}
+                onChange={(e) => set('sioAuth', e.target.value)}
+              />
+              <div className="hint">carried in the CONNECT packet · for servers that read auth there</div>
+            </>
+          )}
 
           <label>Headers</label>
           <textarea rows={4} value={form.headers} spellCheck={false} placeholder="authorization: Bearer …" disabled={!editable} onChange={(e) => set('headers', e.target.value)} />
           <div className="hint">One <code>k: v</code> per line — Authorization and the like.</div>
 
-          {!sse && (
+          {!sse && !sio && (
             <>
               <label>Subprotocols</label>
               <input value={form.protocols} spellCheck={false} placeholder="graphql-ws" disabled={!editable} onChange={(e) => set('protocols', e.target.value)} />
@@ -382,6 +582,33 @@ export default function WsPanel() {
               SSE is receive-only — connect on the left and events stream below. Only the default
               (unnamed) <code>message</code> events are shown.
             </div>
+          ) : sio ? (
+            <>
+              <label>Event</label>
+              <input
+                value={form.sioEvent}
+                spellCheck={false}
+                placeholder="chat:message"
+                onChange={(e) => set('sioEvent', e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) emitEvent(active.id); }}
+              />
+              <div className="hint">the name the server listens for</div>
+
+              <label>Payload JSON</label>
+              <textarea
+                rows={4}
+                value={form.sioPayload}
+                spellCheck={false}
+                placeholder={'{"id":1}'}
+                onChange={(e) => set('sioPayload', e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) emitEvent(active.id); }}
+              />
+              <div className="hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> emits.</div>
+              {/* Deliberately always enabled: a refusal that names its reason
+                  beats a dead button with no explanation. */}
+              <button onClick={() => emitEvent(active.id)}>Emit</button>
+              {emitMsg && <div className="toast">{emitMsg}</div>}
+            </>
           ) : (
             <>
               <label>Send a message</label>
@@ -427,7 +654,9 @@ export default function WsPanel() {
                 <div className="empty-hint">
                   {sse
                     ? 'Events pushed by the server will appear here.'
-                    : 'Incoming frames appear here. Send a message above to check the round trip.'}
+                    : sio
+                      ? 'Events pushed by the server appear here. Emit one above to check the round trip.'
+                      : 'Incoming frames appear here. Send a message above to check the round trip.'}
                 </div>
               </div>
             )}

@@ -230,7 +230,6 @@ export default function HttpPanel() {
   const result = resultsMap[activeId] ?? null;
   const busy = !!busyMap[activeId];
   const setResult = (r: HttpResult | null) => setResultsMap((m) => ({ ...m, [activeId]: r }));
-  const setBusy = (b: boolean) => setBusyMap((m) => ({ ...m, [activeId]: b }));
   const [showHeaders, setShowHeaders] = useState(false);
   const [respView, setRespView] = useState<'pretty' | 'tree' | 'raw'>('tree');
   const [hist, setHist] = useState<HttpHist[]>(() => loadJson(LS_HISTORY, []));
