@@ -579,6 +579,28 @@ fn decode_bytes(root: &Path, proto_rel: &str, res_type: &str, bytes: &[u8]) -> R
     Ok(protobuf::text_format::print_to_string(&*msg))
 }
 
+/* Encoding and decoding parse the .proto (and its imports) from disk, which is
+   blocking work, so the request handlers run them on the blocking pool — the
+   same reason as the scan in `protos`. Decoding takes every frame at once so a
+   multi-message response parses its descriptor on one thread, not one each. */
+async fn encode_off_thread(root: &Path, proto_rel: &str, req_type: &str, text: &str) -> Result<Vec<u8>, String> {
+    let (root, proto_rel, req_type, text) =
+        (root.to_path_buf(), proto_rel.to_string(), req_type.to_string(), text.to_string());
+    tokio::task::spawn_blocking(move || encode_text(&root, &proto_rel, &req_type, &text))
+        .await
+        .map_err(|e| format!("encode task failed: {e}"))?
+}
+
+async fn decode_off_thread(root: &Path, proto_rel: &str, res_type: &str, frames: Vec<Vec<u8>>) -> Vec<Result<String, String>> {
+    let (root, proto_rel, res_type) = (root.to_path_buf(), proto_rel.to_string(), res_type.to_string());
+    let n = frames.len();
+    tokio::task::spawn_blocking(move || {
+        frames.iter().map(|f| decode_bytes(&root, &proto_rel, &res_type, f)).collect()
+    })
+    .await
+    .unwrap_or_else(|e| vec![Err(format!("decode task failed: {e}")); n])
+}
+
 // ------------------------------------------------------------ gRPC-Web wire --
 
 fn frame(payload: &[u8]) -> Vec<u8> {
@@ -882,7 +904,7 @@ async fn do_call(req: CallReq) -> Value {
         Err(e) => return json!({ "ok": false, "stage": "encode", "error": e }),
     };
 
-    let payload = match encode_text(&root, &req.proto, &req.req_type, &req.text_body) {
+    let payload = match encode_off_thread(&root, &req.proto, &req.req_type, &req.text_body).await {
         Ok(p) => p,
         Err(e) => return json!({ "ok": false, "stage": "encode", "error": e }),
     };
@@ -913,7 +935,11 @@ async fn do_call(req: CallReq) -> Value {
                 });
             }
             Ok(ok) => {
-                let decoded = match decode_bytes(&root, &req.proto, &req.res_type, &ok.resp) {
+                let decoded = match decode_off_thread(&root, &req.proto, &req.res_type, vec![ok.resp.clone()])
+                    .await
+                    .pop()
+                    .unwrap_or_else(|| Err("no frame".into()))
+                {
                     Ok(s) => s,
                     Err(e) => format!("<decode failed: {e}>"),
                 };
@@ -1005,8 +1031,9 @@ async fn do_call(req: CallReq) -> Value {
     let non_empty: Vec<&Vec<u8>> = frames.iter().filter(|f| !f.is_empty()).collect();
     let total = non_empty.len();
     let mut parts: Vec<String> = Vec::new();
-    for (i, f) in non_empty.iter().enumerate() {
-        let text = match decode_bytes(&root, &req.proto, &req.res_type, f) {
+    let decoded = decode_off_thread(&root, &req.proto, &req.res_type, non_empty.iter().map(|f| f.to_vec()).collect()).await;
+    for (i, d) in decoded.into_iter().enumerate() {
+        let text = match d {
             Ok(s) => s,
             Err(e) => format!("<decode failed: {e}>"),
         };

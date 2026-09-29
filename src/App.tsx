@@ -97,29 +97,31 @@ export default function App() {
   // panels stay mounted so live feeds / in-flight requests survive tab switches
   return (
     <div className="app">
-      <header className="topbar" role="tablist" aria-label="Protocol">
+      <header className="topbar">
         <span className="brand">
           <span className="brand-mark" aria-hidden="true">
             C
           </span>
           <span className="brand-text">Conduit</span>
         </span>
-        {TABS.map((t, i) => (
-          <span
-            key={t.id}
-            className={`toptab ${tab === t.id ? 'active' : ''}`}
-            role="tab"
-            aria-selected={tab === t.id}
-            tabIndex={0}
-            title={`${t.label} (${MOD}${i === 9 ? 0 : i + 1})`}
-            onClick={() => select(t.id)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') select(t.id);
-            }}
-          >
-            {t.label}
-          </span>
-        ))}
+        <nav className="toptabs" role="tablist" aria-label="Protocol">
+          {TABS.map((t, i) => (
+            <span
+              key={t.id}
+              className={`toptab ${tab === t.id ? 'active' : ''}`}
+              role="tab"
+              aria-selected={tab === t.id}
+              tabIndex={0}
+              title={`${t.label} (${MOD}${i === 9 ? 0 : i + 1})`}
+              onClick={() => select(t.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') select(t.id);
+              }}
+            >
+              {t.label}
+            </span>
+          ))}
+        </nav>
         <span
           className="toptab reset-all"
           role="button"
