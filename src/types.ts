@@ -57,6 +57,12 @@ export interface CallRequest {
   grpcPath?: string;
 }
 
+export interface StatusDetails {
+  code: number;
+  message: string;
+  details: { type: string; value: unknown }[];
+}
+
 export type CallResult =
   | {
       ok: true;
@@ -74,6 +80,7 @@ export type CallResult =
       headers?: Record<string, string>;
       /** parsed gRPC trailers (grpc-status/message + custom) */
       trailers?: Record<string, string>;
+      statusDetails?: StatusDetails | null;
     }
   | {
       ok: false;
