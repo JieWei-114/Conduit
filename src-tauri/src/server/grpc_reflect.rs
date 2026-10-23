@@ -25,6 +25,7 @@ pub fn routes() -> Router {
     Router::new()
         .route("/reflect", post(reflect))
         .route("/reflect/call", post(reflect_call))
+        .route("/health", post(health))
 }
 
 fn is_internal(name: &str) -> bool {
@@ -51,7 +52,27 @@ async fn connect(target: &str, plaintext: Option<bool>) -> Result<tonic::transpo
             .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
             .map_err(|e| e.to_string())?;
     }
-    ep.connect().await.map_err(|e| e.to_string())
+    // a host that never answers would otherwise hold the request for the OS connect timeout
+    ep.connect_timeout(std::time::Duration::from_secs(8))
+        .connect()
+        .await
+        .map_err(|e| with_causes(&e))
+}
+
+/// `e` and every error under it: tonic's own text is only "transport error", the reason
+/// (refused, timed out, no such host) is in its sources.
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+        let text = s.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = s.source();
+    }
+    out
 }
 
 enum ReflectItem {
@@ -303,7 +324,7 @@ fn hint(msg: &str) -> String {
     let m = msg.to_lowercase();
     if is_unimplemented(msg) {
         format!("{msg} — the server does not have gRPC reflection enabled")
-    } else if m.contains("unavailable") || m.contains("connect") || m.contains("refused") {
+    } else if m.contains("unavailable") || m.contains("connect") || m.contains("refused") || m.contains("transport error") {
         format!("{msg} — cannot reach the target (check host:port / plaintext-vs-TLS)")
     } else {
         msg.to_string()
@@ -355,7 +376,46 @@ struct UnaryErr {
     code: i32,
     details: String,
     trailers: HashMap<String, String>,
+    /// `grpc-status-details-bin`, when the server attached a `google.rpc.Status`.
+    status_bin: Vec<u8>,
 }
+
+impl UnaryErr {
+    fn new(code: i32, details: impl Into<String>) -> Self {
+        Self {
+            code,
+            details: details.into(),
+            trailers: HashMap::new(),
+            status_bin: Vec::new(),
+        }
+    }
+
+    fn from_status(status: &Status) -> Self {
+        Self {
+            code: status.code() as i32,
+            details: if status.message().is_empty() {
+                format!("{:?}", status.code())
+            } else {
+                status.message().to_string()
+            },
+            trailers: md_to_map(status.metadata()),
+            status_bin: status.details().to_vec(),
+        }
+    }
+}
+
+/// The messages of a server-streaming call, with its headers and trailers.
+struct StreamOk {
+    messages: Vec<Vec<u8>>,
+    headers: HashMap<String, String>,
+    trailers: HashMap<String, String>,
+    /// Why the stream was cut short, when it was: a cap, or the deadline on an open stream.
+    note: Option<String>,
+}
+
+/// More messages, or more bytes, than any interactive look needs; the rest is dropped.
+const STREAM_MAX: usize = 500;
+const STREAM_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 fn md_to_map(md: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
     let mut out = HashMap::new();
@@ -369,22 +429,12 @@ fn md_to_map(md: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
     out
 }
 
-async fn unary(
-    channel: tonic::transport::Channel,
-    path: &str,
+/// A request carrying `payload`, the caller's headers as metadata, and the deadline.
+fn build_request(
     payload: Vec<u8>,
     headers: &HashMap<String, String>,
     timeout_ms: u64,
-) -> Result<UnaryOk, UnaryErr> {
-    let mut grpc = tonic::client::Grpc::new(channel);
-    if let Err(e) = grpc.ready().await {
-        return Err(UnaryErr {
-            code: 14,
-            details: e.to_string(),
-            trailers: HashMap::new(),
-        });
-    }
-
+) -> Request<Vec<u8>> {
     let mut request = Request::new(payload);
     for (k, v) in headers {
         let lk = k.to_lowercase();
@@ -399,18 +449,48 @@ async fn unary(
         }
     }
     request.set_timeout(std::time::Duration::from_millis(timeout_ms));
+    request
+}
 
+/// A ready client and the call path.
+async fn client(
+    channel: tonic::transport::Channel,
+    path: &str,
+) -> Result<
+    (
+        tonic::client::Grpc<tonic::transport::Channel>,
+        http::uri::PathAndQuery,
+    ),
+    UnaryErr,
+> {
+    let mut grpc = tonic::client::Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(|e| UnaryErr::new(14, e.to_string()))?;
     // `from_maybe_shared` requires `'static`, and `path` is a borrowed `&str`,
     // so the allocation is load-bearing. Clippy does not weigh that bound and
     // suggests passing the reference, which does not compile.
     #[allow(clippy::unnecessary_to_owned)]
-    let path = http::uri::PathAndQuery::from_maybe_shared(path.to_string()).map_err(|e| UnaryErr {
-        code: 3,
-        details: e.to_string(),
-        trailers: HashMap::new(),
-    })?;
+    let path = http::uri::PathAndQuery::from_maybe_shared(path.to_string())
+        .map_err(|e| UnaryErr::new(3, e.to_string()))?;
+    Ok((grpc, path))
+}
 
-    match grpc.unary(request, path, BytesCodec).await {
+async fn unary(
+    channel: tonic::transport::Channel,
+    path: &str,
+    payload: Vec<u8>,
+    headers: &HashMap<String, String>,
+    timeout_ms: u64,
+) -> Result<UnaryOk, UnaryErr> {
+    let (mut grpc, path) = client(channel, path).await?;
+    let request = build_request(payload, headers, timeout_ms);
+    // the deadline is also sent to the server, but one that ignores it must not hold the call open
+    let call = grpc.unary(request, path, BytesCodec);
+    let Ok(answer) = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), call).await else {
+        return Err(UnaryErr::new(4, format!("no answer within {timeout_ms} ms (Conduit's timeout)")));
+    };
+    match answer {
         Ok(resp) => {
             let headers = md_to_map(resp.metadata());
             Ok(UnaryOk {
@@ -419,16 +499,98 @@ async fn unary(
                 trailers: HashMap::new(),
             })
         }
-        Err(status) => Err(UnaryErr {
-            code: status.code() as i32,
-            details: if status.message().is_empty() {
-                format!("{:?}", status.code())
-            } else {
-                status.message().to_string()
-            },
-            trailers: md_to_map(status.metadata()),
-        }),
+        Err(status) => Err(UnaryErr::from_status(&status)),
     }
+}
+
+/// A server-streaming call: every message until the stream ends, up to `STREAM_MAX`. The
+/// deadline covers the whole stream.
+async fn server_stream(
+    channel: tonic::transport::Channel,
+    path: &str,
+    payload: Vec<u8>,
+    headers: &HashMap<String, String>,
+    timeout_ms: u64,
+) -> Result<StreamOk, UnaryErr> {
+    let (mut grpc, path) = client(channel, path).await?;
+    let request = build_request(payload, headers, timeout_ms);
+    // the deadline is also sent to the server, but one that ignores it must not hold the call open
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let resp = tokio::time::timeout_at(deadline, grpc.server_streaming(request, path, BytesCodec))
+        .await
+        .map_err(|_| UnaryErr::new(4, format!("no answer within {timeout_ms} ms (Conduit's timeout)")))?
+        .map_err(|s| UnaryErr::from_status(&s))?;
+    let headers = md_to_map(resp.metadata());
+    let mut stream = resp.into_inner();
+    let mut messages: Vec<Vec<u8>> = Vec::new();
+    let mut bytes = 0;
+    loop {
+        if messages.len() >= STREAM_MAX || bytes >= STREAM_MAX_BYTES {
+            // stop reading: asking for the trailers would wait for the rest of the stream
+            let note = format!(
+                "stopped after {} messages ({} KB); the stream had more",
+                messages.len(),
+                bytes / 1024
+            );
+            return Ok(StreamOk {
+                messages,
+                headers,
+                trailers: HashMap::new(),
+                note: Some(note),
+            });
+        }
+        let Ok(next) = tokio::time::timeout_at(deadline, stream.message()).await else {
+            if messages.is_empty() {
+                return Err(UnaryErr::new(4, format!("no message within {timeout_ms} ms (Conduit's timeout)")));
+            }
+            let note = format!(
+                "stopped at the {timeout_ms} ms timeout with the stream still open; showing the {} message(s) received",
+                messages.len()
+            );
+            return Ok(StreamOk { messages, headers, trailers: HashMap::new(), note: Some(note) });
+        };
+        match next {
+            Ok(Some(m)) => {
+                bytes += m.len();
+                messages.push(m);
+            }
+            Ok(None) => break,
+            // a stream that stays open (watch / subscribe) ends at the deadline: keep what came
+            Err(status)
+                if !messages.is_empty()
+                    && matches!(
+                        status.code(),
+                        tonic::Code::DeadlineExceeded | tonic::Code::Cancelled
+                    ) =>
+            {
+                let note = format!(
+                    "the stream was still open at the timeout; showing the {} message(s) received",
+                    messages.len()
+                );
+                return Ok(StreamOk {
+                    messages,
+                    headers,
+                    trailers: HashMap::new(),
+                    note: Some(note),
+                });
+            }
+            Err(status) => {
+                let mut err = UnaryErr::from_status(&status);
+                err.details = format!("{} (after {} message(s))", err.details, messages.len());
+                return Err(err);
+            }
+        }
+    }
+    let trailers = match stream.trailers().await {
+        Ok(Some(md)) => md_to_map(&md),
+        _ => HashMap::new(),
+    };
+    Ok(StreamOk {
+        messages,
+        headers,
+        trailers,
+        note: None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -470,8 +632,8 @@ async fn reflect_call(Json(req): Json<CallReq>) -> Json<Value> {
         Some(m) => m,
         None => return Json(json!({ "ok": false, "stage": "encode", "error": format!("method {method} not found on {service}") })),
     };
-    if md.is_client_streaming() || md.is_server_streaming() {
-        return Json(json!({ "ok": false, "stage": "encode", "error": "streaming RPCs are not supported here — unary only" }));
+    if md.is_client_streaming() {
+        return Json(json!({ "ok": false, "stage": "encode", "error": "client and bidirectional streaming are not supported here — unary and server streaming only" }));
     }
 
     let input = md.input();
@@ -488,22 +650,45 @@ async fn reflect_call(Json(req): Json<CallReq>) -> Json<Value> {
     let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(15000);
 
     let t0 = Instant::now();
+    if md.is_server_streaming() {
+        let result = server_stream(channel, &path, payload, &headers, timeout_ms).await;
+        let duration_ms = t0.elapsed().as_millis() as u64;
+        return Json(match result {
+            Err(e) => failed(e, &pool, duration_ms, &req.headers),
+            Ok(ok) => {
+                let total = ok.messages.len();
+                let raw_bytes: usize = ok.messages.iter().map(Vec::len).sum();
+                let decoded: Vec<String> = ok
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let text = decode_response(&output, m)
+                            .unwrap_or_else(|e| format!("<decode failed: {e}>"));
+                        format!("──── message {} of {total} ────\n{text}", i + 1)
+                    })
+                    .collect();
+                json!({
+                    "ok": true,
+                    "httpStatus": 200,
+                    "grpcStatus": "0",
+                    "grpcMessage": ok.note.clone().unwrap_or_default(),
+                    "decoded": if total == 0 { "(the stream ended without a message)".to_string() } else { decoded.join("\n") },
+                    "frames": total,
+                    "rawBytes": raw_bytes,
+                    "durationMs": duration_ms,
+                    "reqHeaders": req.headers,
+                    "headers": ok.headers,
+                    "trailers": ok.trailers,
+                })
+            }
+        });
+    }
     let result = unary(channel, &path, payload, &headers, timeout_ms).await;
     let duration_ms = t0.elapsed().as_millis() as u64;
 
     match result {
-        Err(e) => Json(json!({
-            "ok": true,
-            "httpStatus": 200,
-            "grpcStatus": e.code.to_string(),
-            "grpcMessage": e.details,
-            "decoded": "",
-            "frames": 0,
-            "rawBytes": 0,
-            "durationMs": duration_ms,
-            "reqHeaders": req.headers,
-            "trailers": e.trailers,
-        })),
+        Err(e) => Json(failed(e, &pool, duration_ms, &req.headers)),
         Ok(ok) => {
             let raw_bytes = ok.resp.len();
             let decoded = match decode_response(&output, &ok.resp) {
@@ -525,6 +710,102 @@ async fn reflect_call(Json(req): Json<CallReq>) -> Json<Value> {
             }))
         }
     }
+}
+
+/// The response for a call the server answered with an error status, with its rich error
+/// details decoded against the server's descriptors when it sent any.
+fn failed(
+    e: UnaryErr,
+    pool: &DescriptorPool,
+    duration_ms: u64,
+    req_headers: &Option<HashMap<String, String>>,
+) -> Value {
+    json!({
+        "ok": true,
+        "httpStatus": 200,
+        "grpcStatus": e.code.to_string(),
+        "grpcMessage": e.details,
+        "decoded": "",
+        "frames": 0,
+        "rawBytes": 0,
+        "durationMs": duration_ms,
+        "reqHeaders": req_headers,
+        "trailers": e.trailers,
+        "statusDetails": super::grpc_status::decode(&e.status_bin, Some(pool)),
+    })
+}
+
+#[derive(Deserialize)]
+struct HealthReq {
+    target: Option<String>,
+    plaintext: Option<bool>,
+    /// The service to ask about; empty asks about the server as a whole.
+    #[serde(default)]
+    service: String,
+    headers: Option<HashMap<String, String>>,
+    #[serde(rename = "timeoutMs")]
+    timeout_ms: Option<u64>,
+}
+
+/// `grpc.health.v1.HealthCheckResponse.ServingStatus` by number.
+fn serving_status(n: u64) -> &'static str {
+    match n {
+        1 => "SERVING",
+        2 => "NOT_SERVING",
+        3 => "SERVICE_UNKNOWN",
+        _ => "UNKNOWN",
+    }
+}
+
+/// `grpc.health.v1.Health/Check`. Its two messages are one field each, so they are written
+/// and read by hand rather than through reflection, which a server may not offer.
+async fn health(Json(req): Json<HealthReq>) -> Json<Value> {
+    let target = req.target.unwrap_or_default();
+    if target.trim().is_empty() {
+        return Json(json!({ "ok": false, "error": "target host:port required" }));
+    }
+    let channel = match connect(&target, req.plaintext).await {
+        Ok(c) => c,
+        Err(e) => return Json(json!({ "ok": false, "error": hint(&e) })),
+    };
+    // HealthCheckRequest { string service = 1; }
+    let mut payload = Vec::new();
+    if !req.service.is_empty() {
+        payload.push(0x0a);
+        prost::encoding::encode_varint(req.service.len() as u64, &mut payload);
+        payload.extend_from_slice(req.service.as_bytes());
+    }
+    let t0 = Instant::now();
+    let headers = req.headers.unwrap_or_default();
+    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(5000);
+    let result = unary(
+        channel,
+        "/grpc.health.v1.Health/Check",
+        payload,
+        &headers,
+        timeout_ms,
+    )
+    .await;
+    let duration_ms = t0.elapsed().as_millis() as u64;
+    Json(match result {
+        // HealthCheckResponse { ServingStatus status = 1; } — absent means 0, UNKNOWN
+        Ok(ok) => {
+            let status = super::grpc_status::wire_dump(&ok.resp)
+                .get("1")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            json!({ "ok": true, "status": serving_status(status), "durationMs": duration_ms })
+        }
+        Err(e) => json!({
+            "ok": false,
+            "error": match e.code {
+                12 => "the server does not implement the gRPC health service (grpc.health.v1.Health)".to_string(),
+                5 => format!("the server has no health status for this service ({})", e.details),
+                _ => format!("{}: {}", e.code, e.details),
+            },
+            "durationMs": duration_ms,
+        }),
+    })
 }
 
 fn encode_request(input: &MessageDescriptor, raw: &str) -> Result<Vec<u8>, String> {

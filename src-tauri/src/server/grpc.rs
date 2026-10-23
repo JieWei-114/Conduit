@@ -725,6 +725,8 @@ struct DirectErr {
     code: i32,
     details: String,
     trailers: HashMap<String, String>,
+    /// `grpc-status-details-bin`, when the server attached a `google.rpc.Status`.
+    status_bin: Vec<u8>,
 }
 
 fn md_to_obj(md: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
@@ -753,25 +755,25 @@ async fn call_direct(
     let mut ep = match tonic::transport::Channel::from_shared(uri) {
         Ok(e) => e,
         Err(e) => {
-            return Err(DirectErr { code: 2, details: format!("{e}"), trailers: HashMap::new() });
+            return Err(DirectErr { code: 2, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() });
         }
     };
     ep = ep.timeout(Duration::from_millis(timeout_ms)).connect_timeout(Duration::from_millis(timeout_ms));
     if !plaintext {
         match ep.tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots()) {
             Ok(e) => ep = e,
-            Err(e) => return Err(DirectErr { code: 2, details: format!("{e}"), trailers: HashMap::new() }),
+            Err(e) => return Err(DirectErr { code: 2, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() }),
         }
     }
 
     let channel = match ep.connect().await {
         Ok(c) => c,
-        Err(e) => return Err(DirectErr { code: 14, details: format!("{e}"), trailers: HashMap::new() }),
+        Err(e) => return Err(DirectErr { code: 14, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() }),
     };
 
     let mut grpc = tonic::client::Grpc::new(channel);
     if let Err(e) = grpc.ready().await {
-        return Err(DirectErr { code: 14, details: format!("{e}"), trailers: HashMap::new() });
+        return Err(DirectErr { code: 14, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() });
     }
 
     let mut request = tonic::Request::new(payload);
@@ -790,7 +792,7 @@ async fn call_direct(
 
     let path = match http::uri::PathAndQuery::from_maybe_shared(req.grpc_path.clone().unwrap_or_default()) {
         Ok(p) => p,
-        Err(e) => return Err(DirectErr { code: 3, details: format!("{e}"), trailers: HashMap::new() }),
+        Err(e) => return Err(DirectErr { code: 3, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() }),
     };
 
     match grpc.unary(request, path, RawCodec).await {
@@ -805,6 +807,7 @@ async fn call_direct(
             code: status.code() as i32,
             details: if status.message().is_empty() { status.code().to_string() } else { status.message().to_string() },
             trailers: md_to_obj(status.metadata()),
+            status_bin: status.details().to_vec(),
         }),
     }
 }
@@ -932,6 +935,7 @@ async fn do_call(req: CallReq) -> Value {
                     "durationMs": duration_ms,
                     "reqHeaders": req.headers,
                     "trailers": e.trailers,
+                    "statusDetails": super::grpc_status::decode(&e.status_bin, None),
                 });
             }
             Ok(ok) => {
@@ -1055,6 +1059,10 @@ async fn do_call(req: CallReq) -> Value {
         "durationMs": duration_ms,
         "reqHeaders": headers,
         "headers": resp_headers,
+        "statusDetails": trailers
+            .get("grpc-status-details-bin")
+            .or_else(|| resp_headers.get("grpc-status-details-bin"))
+            .and_then(|b| super::grpc_status::decode_trailer(b, None)),
         "trailers": trailers,
     })
 }
