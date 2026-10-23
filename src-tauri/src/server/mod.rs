@@ -2,10 +2,13 @@ pub mod db;
 pub mod diag;
 pub mod grpc;
 pub mod grpc_reflect;
+pub mod grpc_status;
 pub mod http;
 pub mod kafka;
+pub mod ops;
 pub mod pulsar;
 pub mod redis;
+pub mod redis_conn;
 pub mod sse;
 pub mod static_files;
 pub mod store;
@@ -24,6 +27,7 @@ pub fn app() -> Router {
         .nest("/api/grpc", grpc::routes().merge(grpc_reflect::routes()))
         .nest("/api/http", http::routes())
         .nest("/api/kafka", kafka::routes())
+        .nest("/api/ops", ops::routes())
         .nest("/api/pulsar", pulsar::routes())
         .nest("/api/redis", redis::routes())
         .nest("/api/sse", sse::routes())
