@@ -11,6 +11,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_stream::StreamExt;
 
+use super::redis_conn::{self, normalize, Conn, ScanLimits};
+
 const ELEM_MAX: isize = 500;
 
 pub fn routes() -> Router {
@@ -30,26 +32,9 @@ pub fn routes() -> Router {
         .route("/subscribe", get(subscribe))
 }
 
-fn normalize(raw: &str) -> String {
-    let t = raw.trim();
-    let lower = t.to_ascii_lowercase();
-    if lower.starts_with("redis://") || lower.starts_with("rediss://") {
-        t.to_string()
-    } else {
-        format!("redis://{}", t)
-    }
-}
-
-async fn conn(raw: &str) -> Result<redis::aio::MultiplexedConnection, String> {
-    if raw.trim().is_empty() {
-        return Err("missing connection url".into());
-    }
-    let url = normalize(raw);
-    let client = redis::Client::open(url).map_err(|e| e.to_string())?;
-    client
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| e.to_string())
+/// One server or a cluster, whichever `raw` points at.
+async fn conn(raw: &str) -> Result<Conn, String> {
+    redis_conn::connect(raw).await
 }
 
 fn err(e: impl std::fmt::Display) -> Json<Value> {
@@ -100,7 +85,13 @@ async fn ping(Json(b): Json<PingReq>) -> Json<Value> {
         Err(e) => return err(e),
     };
     match redis::cmd("PING").query_async::<String>(&mut c).await {
-        Ok(pong) => Json(json!({ "ok": true, "pong": pong })),
+        Ok(pong) => Json(json!({
+            "ok": true,
+            "pong": pong,
+            "cluster": !c.masters().is_empty(),
+            "masters": c.masters().len(),
+            "note": c.note(),
+        })),
         Err(e) => err(e),
     }
 }
@@ -140,31 +131,11 @@ async fn scan(Json(b): Json<ScanReq>) -> Json<Value> {
         return Json(json!({ "ok": true, "cursor": "0", "keys": keys }));
     }
 
-    let target = 200usize;
-    let max_iter = 60;
-    let mut cur = cursor;
-    let mut found: Vec<String> = Vec::new();
-    let mut iter = 0;
-    loop {
-        let res: Result<(String, Vec<String>), _> = redis::cmd("SCAN")
-            .arg(&cur)
-            .arg("MATCH")
-            .arg(&pat)
-            .arg("COUNT")
-            .arg(300)
-            .query_async(&mut c)
-            .await;
-        let (next, batch) = match res {
-            Ok(v) => v,
-            Err(e) => return err(e),
-        };
-        found.extend(batch);
-        cur = next;
-        iter += 1;
-        if cur == "0" || found.len() >= target || iter >= max_iter {
-            break;
-        }
-    }
+    let limits = ScanLimits { count: 300, want: 200, max_calls: 60 };
+    let (cur, found) = match redis_conn::scan(&mut c, &pat, &cursor, &limits).await {
+        Ok(page) => (page.cursor, page.keys),
+        Err(e) => return err(e),
+    };
 
     let mut keys = Vec::with_capacity(found.len());
     for k in &found {
@@ -180,7 +151,7 @@ async fn scan(Json(b): Json<ScanReq>) -> Json<Value> {
 }
 
 async fn read_value(
-    c: &mut redis::aio::MultiplexedConnection,
+    c: &mut Conn,
     key: &str,
     ty: &str,
     cursor: Option<&str>,
@@ -597,29 +568,11 @@ async fn children(Json(b): Json<ChildrenReq>) -> Json<Value> {
     };
 
     let pat = format!("{}*", prefix);
-    let mut cur = "0".to_string();
-    let mut iter = 0;
-    let mut keys: Vec<String> = Vec::new();
-    loop {
-        let res: Result<(String, Vec<String>), _> = redis::cmd("SCAN")
-            .arg(&cur)
-            .arg("MATCH")
-            .arg(&pat)
-            .arg("COUNT")
-            .arg(1000)
-            .query_async(&mut c)
-            .await;
-        let (next, batch) = match res {
-            Ok(v) => v,
-            Err(e) => return err(e),
-        };
-        keys.extend(batch);
-        cur = next;
-        iter += 1;
-        if cur == "0" || keys.len() >= 5000 || iter >= 60 {
-            break;
-        }
-    }
+    let limits = ScanLimits { count: 1000, want: 5000, max_calls: 60 };
+    let (keys, complete) = match redis_conn::scan(&mut c, &pat, "0", &limits).await {
+        Ok(page) => (page.keys, page.cursor == "0"),
+        Err(e) => return err(e),
+    };
 
     struct Seg {
         seg: String,
@@ -689,7 +642,7 @@ async fn children(Json(b): Json<ChildrenReq>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "prefix": prefix,
-        "truncated": keys.len() >= 5000,
+        "truncated": !complete,
         "children": children,
     }))
 }
@@ -761,29 +714,11 @@ async fn export(Json(b): Json<ExportReq>) -> Json<Value> {
         Err(e) => return err(e),
     };
 
-    let mut cur = "0".to_string();
-    let mut iter = 0;
-    let mut keys: Vec<String> = Vec::new();
-    loop {
-        let res: Result<(String, Vec<String>), _> = redis::cmd("SCAN")
-            .arg(&cur)
-            .arg("MATCH")
-            .arg(&pat)
-            .arg("COUNT")
-            .arg(500)
-            .query_async(&mut c)
-            .await;
-        let (next, batch) = match res {
-            Ok(v) => v,
-            Err(e) => return err(e),
-        };
-        keys.extend(batch);
-        cur = next;
-        iter += 1;
-        if cur == "0" || keys.len() >= cap || iter >= 100 {
-            break;
-        }
-    }
+    let limits = ScanLimits { count: 500, want: cap, max_calls: 100 };
+    let (cur, keys) = match redis_conn::scan(&mut c, &pat, "0", &limits).await {
+        Ok(page) => (page.cursor, page.keys),
+        Err(e) => return err(e),
+    };
 
     let slice: Vec<String> = keys.iter().take(cap).cloned().collect();
     let mut data = serde_json::Map::new();
