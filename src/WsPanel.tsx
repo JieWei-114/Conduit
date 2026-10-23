@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
+import { ConnPill, Empty, FeedRow, PanelHead, ReqTabs, Section, usePersist } from './ui';
+import { EXAMPLES } from './examples';
 
 const LS_TABS = 'conduit.ws.tabs.v1';
 const LS_FORM = 'conduit.ws.form.v1'; // legacy single-form (migrated)
@@ -46,15 +48,6 @@ interface WTab { id: number; form: WsForm }
 interface Msg { id: number; dir: 'in' | 'out' | 'sys'; at: string; text: string }
 type St = { s: 'idle' | 'connecting' | 'live' | 'error'; msg?: string };
 
-function tryJson(s: string): string | null {
-  const t = s.trim();
-  if (!(t.startsWith('{') || t.startsWith('['))) return null;
-  try {
-    return JSON.stringify(JSON.parse(t), null, 2);
-  } catch {
-    return null;
-  }
-}
 /* A binary frame arrives base64-encoded with its byte count, because the wire
    is JSON and the bytes are not guaranteed to be valid UTF-8. Label it so the
    feed cannot be mistaken for text the server actually sent. */
@@ -111,9 +104,8 @@ export default function WsPanel() {
     setTabs((ts) => ts.map((t) => (t.id === active.id ? { ...t, form: u(t.form) } : t)));
   const set = <K extends keyof WsForm>(k: K, v: WsForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
-  useEffect(() => {
-    localStorage.setItem(LS_TABS, JSON.stringify({ tabs, activeId }));
-  }, [tabs, activeId]);
+  const persisted = useMemo(() => ({ tabs, activeId }), [tabs, activeId]);
+  usePersist(LS_TABS, persisted, () => JSON.stringify({ tabs, activeId }));
   useEffect(
     () => () => {
       wsRefs.current.forEach((ws) => ws.close());
@@ -390,72 +382,50 @@ export default function WsPanel() {
     set('mode', mode);
   };
 
+  const loadExample = (ex: typeof EXAMPLES.ws) => {
+    if (!editable) disconnect(active.id);
+    setForm((f) => ({ ...f, mode: 'ws', url: ex.url }));
+  };
+
+  const pillState = connState === 'live' ? 'live' : connState === 'connecting' ? 'connecting' : connState === 'error' ? 'error' : 'idle';
+
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs" role="tablist" aria-label="Connections">
-        {tabs.map((t) => {
+      <ReqTabs
+        tabs={tabs}
+        activeId={activeId}
+        ariaLabel="Connections"
+        label={tabLabel}
+        title={(t) => t.form.url}
+        state={(t) => {
           const s = stateMap[t.id]?.s;
-          return (
-            <button
-              type="button"
-              key={t.id}
-              className={`req-tab ${t.id === activeId ? 'active' : ''}`}
-              role="tab"
-              aria-selected={t.id === activeId}
-              onClick={() => setActiveId(t.id)}
-              title={t.form.url}
-            >
-              {s === 'live' ? '🟢 ' : s === 'connecting' ? '🟡 ' : s === 'error' ? '🔴 ' : ''}
-              {tabLabel(t)}
-              {tabs.length > 1 && (
-                // Lives inside the tab button, so it stays a role="button" span:
-                // a button cannot contain another button.
-                <i
-                  className="chip-x"
-                  role="button"
-                  tabIndex={0}
-                  aria-label="Close this tab"
-                  title="Close this tab"
-                  onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      closeTab(t.id);
-                    }
-                  }}
-                > ✕</i>
-              )}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          className="req-tab req-tab-add"
-          aria-label="New tab"
-          title="New tab"
-          onClick={addTab}
-        >+</button>
-      </div>
+          return s === 'idle' ? undefined : s;
+        }}
+        onSelect={setActiveId}
+        onClose={closeTab}
+        onAdd={addTab}
+      />
 
       <div className="layout">
         <div className="left">
-          <h3>
-            {sse ? 'SSE' : sio ? 'Socket.IO' : 'WebSocket'}{' '}
-            <span className="badge">live stream</span>
-          </h3>
-          <div className="tabs" role="tablist" aria-label="Transport">
-            {([
-              ['ws', 'WebSocket'],
-              ['sio', 'Socket.IO'],
-              ['sse', 'SSE'],
-            ] as const).map(([m, label]) => (
+          <PanelHead
+            title="WebSocket / SSE"
+            badge={sse ? 'SSE' : sio ? 'Socket.IO' : 'WebSocket'}
+            tagline="Open a WebSocket, Socket.IO or Server-Sent Events stream and watch messages arrive."
+          />
+          <div className="seg" role="group" aria-label="Protocol">
+            {(
+              [
+                ['ws', 'WebSocket'],
+                ['sio', 'Socket.IO'],
+                ['sse', 'SSE'],
+              ] as const
+            ).map(([m, label]) => (
               <button
                 type="button"
                 key={m}
-                className={form.mode === m ? 'tab active' : 'tab'}
-                role="tab"
-                aria-selected={form.mode === m}
+                className={form.mode === m ? 'on' : ''}
+                aria-pressed={form.mode === m}
                 onClick={() => switchMode(m)}
               >
                 {label}
@@ -463,20 +433,21 @@ export default function WsPanel() {
             ))}
           </div>
 
-          <label>Saved connection</label>
-          <div className="row field-row">
+          <div className="saved-bar mt-3">
             <select
-              className="grow"
               value={picked}
+              aria-label="Saved connections"
               onChange={(e) => {
                 setPicked(e.target.value);
                 const s = saved.find((x) => x.name === e.target.value);
                 if (s) setForm(() => hydrate(s.form));
               }}
             >
-              <option value=""> - </option>
+              <option value="">{saved.length ? 'Open a saved connection…' : 'No saved connections yet'}</option>
               {saved.map((s) => (
-                <option key={s.name} value={s.name}>{s.name}</option>
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
               ))}
             </select>
             <SaveAs
@@ -488,193 +459,236 @@ export default function WsPanel() {
               }}
               onMessage={flash}
             />
-            <button className="btn-field btn-danger" disabled={!picked} onClick={() => { persistSaved(saved.filter((s) => s.name !== picked)); setPicked(''); }}>
+            <button
+              className="btn-secondary btn-danger"
+              disabled={!picked}
+              onClick={() => {
+                persistSaved(saved.filter((s) => s.name !== picked));
+                setPicked('');
+              }}
+            >
               Delete
             </button>
           </div>
           {flashMsg && <div className="toast">{flashMsg}</div>}
 
-          <label>URL</label>
-          <div className="row field-row">
-            <input
-              className="grow"
-              value={form.url}
+          <Section
+            title="Connection"
+            actions={<ConnPill state={pillState} text={connState === 'error' ? 'Error' : connText} />}
+          >
+            <div className="row row-tight">
+              <input
+                className="grow"
+                value={form.url}
+                spellCheck={false}
+                aria-label="URL"
+                placeholder={sse ? 'https://host/events' : sio ? 'http://host:3000' : 'wss://echo.websocket.org'}
+                disabled={!editable}
+                onChange={(e) => set('url', e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && connect(active.id)}
+              />
+              <button
+                className={live || connState === 'connecting' ? 'btn-secondary btn-on' : 'btn-primary'}
+                onClick={() => connect(active.id)}
+              >
+                {live || connState === 'connecting' ? 'Disconnect' : 'Connect'}
+              </button>
+            </div>
+            <div className="hint">
+              {sse
+                ? 'An http:// or https:// endpoint that streams text/event-stream.'
+                : sio
+                  ? 'The server root, e.g. http://localhost:3000. The handshake path below is added for you.'
+                  : 'A ws:// or wss:// URL. Fields lock while connected.'}
+            </div>
+            {connState === 'error' && st.msg && <div className="error">{st.msg}</div>}
+
+            {sio && (
+              <>
+                <div className="conn-row">
+                  <div className="grow">
+                    <label>Path</label>
+                    <input value={form.sioPath} spellCheck={false} placeholder="/socket.io" disabled={!editable} onChange={(e) => set('sioPath', e.target.value)} />
+                  </div>
+                  <div className="grow">
+                    <label>Namespace</label>
+                    <input value={form.sioNamespace} spellCheck={false} placeholder="/" disabled={!editable} onChange={(e) => set('sioNamespace', e.target.value)} />
+                  </div>
+                </div>
+                <div className="hint">Where Socket.IO is mounted, and the namespace to join (/ is the default).</div>
+
+                <label>Handshake query</label>
+                <input value={form.sioQuery} spellCheck={false} placeholder="token=abc&room=1" disabled={!editable} onChange={(e) => set('sioQuery', e.target.value)} />
+                <div className="hint">Added to the handshake URL, for servers that read auth there.</div>
+
+                <label>Auth JSON</label>
+                <input value={form.sioAuth} spellCheck={false} placeholder={'{"token":"…"}'} disabled={!editable} onChange={(e) => set('sioAuth', e.target.value)} />
+                <div className="hint">Sent in the CONNECT packet, for servers that read auth there.</div>
+              </>
+            )}
+          </Section>
+
+          <Section title="Headers" hint={<>One <code>name: value</code> per line, e.g. Authorization.</>}>
+            <textarea
+              rows={3}
+              value={form.headers}
               spellCheck={false}
-              placeholder={sse ? 'https://host/events' : sio ? 'http://host:3000' : 'wss://host/path'}
+              aria-label="Headers"
+              placeholder="authorization: Bearer …"
               disabled={!editable}
-              onChange={(e) => set('url', e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && connect(active.id)}
+              onChange={(e) => set('headers', e.target.value)}
             />
-            <button className={`btn-field ${live || connState === 'connecting' ? 'btn-on' : ''}`} onClick={() => connect(active.id)}>
-              {live || connState === 'connecting' ? 'Disconnect' : 'Connect'}
-            </button>
-          </div>
-          <div className="hint">
-            {sse
-              ? 'http:// or https://'
-              : sio
-                ? 'the server root — the handshake path below is appended'
-                : 'ws:// or wss://'}
-          </div>
-
-          {sio && (
-            <>
-              <label>Path</label>
-              <input
-                value={form.sioPath}
-                spellCheck={false}
-                placeholder="/socket.io"
-                disabled={!editable}
-                onChange={(e) => set('sioPath', e.target.value)}
-              />
-              <div className="hint">where Socket.IO is mounted on the server</div>
-
-              <label>Namespace</label>
-              <input
-                value={form.sioNamespace}
-                spellCheck={false}
-                placeholder="/"
-                disabled={!editable}
-                onChange={(e) => set('sioNamespace', e.target.value)}
-              />
-              <div className="hint">sent in the CONNECT packet · leave as / for the default</div>
-
-              <label>Handshake query</label>
-              <input
-                value={form.sioQuery}
-                spellCheck={false}
-                placeholder="token=abc&room=1"
-                disabled={!editable}
-                onChange={(e) => set('sioQuery', e.target.value)}
-              />
-              <div className="hint">appended to the handshake URL · for servers that read auth there</div>
-
-              <label>Auth JSON</label>
-              <input
-                value={form.sioAuth}
-                spellCheck={false}
-                placeholder={'{"token":"…"}'}
-                disabled={!editable}
-                onChange={(e) => set('sioAuth', e.target.value)}
-              />
-              <div className="hint">carried in the CONNECT packet · for servers that read auth there</div>
-            </>
-          )}
-
-          <label>Headers</label>
-          <textarea rows={4} value={form.headers} spellCheck={false} placeholder="authorization: Bearer …" disabled={!editable} onChange={(e) => set('headers', e.target.value)} />
-          <div className="hint">One <code>k: v</code> per line — Authorization and the like.</div>
-
-          {!sse && !sio && (
-            <>
-              <label>Subprotocols</label>
-              <input value={form.protocols} spellCheck={false} placeholder="graphql-ws" disabled={!editable} onChange={(e) => set('protocols', e.target.value)} />
-              <div className="hint">Optional, comma-separated.</div>
-            </>
-          )}
-
-          <div className={`${connCls} mt-4`}>{connText}</div>
+            {!sse && !sio && (
+              <>
+                <label>Subprotocols</label>
+                <input value={form.protocols} spellCheck={false} placeholder="graphql-ws" disabled={!editable} onChange={(e) => set('protocols', e.target.value)} />
+                <div className="hint">Optional, comma-separated.</div>
+              </>
+            )}
+          </Section>
         </div>
 
         <div className="right">
           {sse ? (
-            <div className="hint">
-              SSE is receive-only — connect on the left and events stream below. Only the default
-              (unnamed) <code>message</code> events are shown.
+            <div className="hint m-0 mb-3">
+              SSE is receive-only: connect on the left and events stream below. Only default (unnamed) <code>message</code>{' '}
+              events are shown.
             </div>
           ) : sio ? (
-            <>
-              <label>Event</label>
-              <input
-                value={form.sioEvent}
-                spellCheck={false}
-                placeholder="chat:message"
-                onChange={(e) => set('sioEvent', e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) emitEvent(active.id); }}
-              />
-              <div className="hint">the name the server listens for</div>
-
-              <label>Payload JSON</label>
+            <Section flush title="Emit an event">
+              <div className="row">
+                <input
+                  className="w-lg"
+                  value={form.sioEvent}
+                  spellCheck={false}
+                  aria-label="Event name"
+                  placeholder="chat:message"
+                  onChange={(e) => set('sioEvent', e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) emitEvent(active.id);
+                  }}
+                />
+                <span className="hint grow">The event name the server listens for.</span>
+              </div>
               <textarea
+                className="mt-2"
                 rows={4}
                 value={form.sioPayload}
                 spellCheck={false}
+                aria-label="Payload JSON"
                 placeholder={'{"id":1}'}
                 onChange={(e) => set('sioPayload', e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) emitEvent(active.id); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) emitEvent(active.id);
+                }}
               />
-              <div className="hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> emits.</div>
-              {/* Deliberately always enabled: a refusal that names its reason
-                  beats a dead button with no explanation. */}
-              <button onClick={() => emitEvent(active.id)}>Emit</button>
-              {emitMsg && <div className="toast">{emitMsg}</div>}
-            </>
+              <div className="inline mt-2">
+                <button className="btn-primary" onClick={() => emitEvent(active.id)}>
+                  Emit
+                </button>
+                <span className="hint m-0">
+                  JSON payload. <kbd>⌘↵</kbd> emits.
+                </span>
+                {emitMsg && <span className="toast m-0">{emitMsg}</span>}
+              </div>
+            </Section>
           ) : (
-            <>
-              <label>Send a message</label>
+            <Section flush title="Send a message">
               <textarea
                 rows={4}
                 value={outboxMap[active.id] ?? ''}
                 spellCheck={false}
-                placeholder={live ? '{"type":"subscribe",…}' : 'connect first'}
+                aria-label="Message"
+                placeholder={live ? '{"type":"subscribe"}' : 'Connect first'}
                 disabled={!live}
                 onChange={(e) => setOutboxMap((m) => ({ ...m, [active.id]: e.target.value }))}
-                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendMsg(active.id); }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) sendMsg(active.id);
+                }}
               />
-              <div className="hint"><kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> sends.</div>
-              <button disabled={!live} onClick={() => sendMsg(active.id)}>Send</button>
-            </>
+              <div className="inline mt-2">
+                <button className="btn-primary" disabled={!live} onClick={() => sendMsg(active.id)}>
+                  Send
+                </button>
+                <span className="hint m-0">
+                  <kbd>⌘↵</kbd> sends.
+                </span>
+              </div>
+            </Section>
           )}
 
-          <div className="section">
+          <Section
+            title={
+              <>
+                Messages{' '}
+                {msgs.length > 0 && <span className="count">({fq ? `${shown.length}/${msgs.length}` : msgs.length})</span>}
+              </>
+            }
+            actions={
+              msgs.length > 0 && (
+                <button
+                  className="btn-ghost btn-sm"
+                  title="Discard the messages received so far"
+                  onClick={() => setMsgsMap((m) => ({ ...m, [active.id]: [] }))}
+                >
+                  Clear
+                </button>
+              )
+            }
+          >
             {msgs.length > 0 && (
-              <div className="feed-head inline">
-                <span className="count">{fq ? `${shown.length} / ${msgs.length}` : msgs.length} messages</span>
-                <input
-                  className="grow"
-                  placeholder="filter messages"
-                  value={filter}
-                  spellCheck={false}
-                  onChange={(e) => setFilterMap((m) => ({ ...m, [active.id]: e.target.value }))}
-                />
-                <button className="btn-field btn-danger" title="Discard the messages received so far" onClick={() => setMsgsMap((m) => ({ ...m, [active.id]: [] }))}>Clear</button>
-              </div>
+              <input
+                placeholder="Filter messages"
+                aria-label="Filter messages"
+                value={filter}
+                spellCheck={false}
+                onChange={(e) => setFilterMap((m) => ({ ...m, [active.id]: e.target.value }))}
+              />
             )}
             {msgs.length === 0 && connState !== 'live' && (
-              <div className="empty">
-                <div className="empty-icon">◈</div>
-                <div className="empty-title">Not connected</div>
-                <div className="empty-hint">Enter a URL on the left and press <kbd>Connect</kbd> to stream messages here.</div>
-              </div>
+              <Empty
+                icon="⇅"
+                title="Not connected"
+                hint={
+                  <>
+                    Enter a URL on the left and press <kbd>Connect</kbd>. To try it, <code>wss://echo.websocket.org</code>{' '}
+                    sends back whatever you send.
+                  </>
+                }
+              >
+                <button className="btn-secondary btn-sm" onClick={() => loadExample(EXAMPLES.ws)}>
+                  Use the echo server
+                </button>
+              </Empty>
             )}
             {msgs.length === 0 && connState === 'live' && (
-              <div className="empty">
-                <div className="empty-icon">◈</div>
-                <div className="empty-title">Connected, no messages yet</div>
-                <div className="empty-hint">
-                  {sse
+              <Empty
+                icon="⇅"
+                title="Connected, no messages yet"
+                hint={
+                  sse
                     ? 'Events pushed by the server will appear here.'
                     : sio
-                      ? 'Events pushed by the server appear here. Emit one above to check the round trip.'
-                      : 'Incoming frames appear here. Send a message above to check the round trip.'}
-                </div>
-              </div>
+                      ? 'Events from the server appear here. Emit one above to check the round trip.'
+                      : 'Incoming frames appear here. Send a message above to check the round trip.'
+                }
+              />
             )}
             {msgs.length > 0 && (
               <div className="feed">
-                {shown.map((m) => {
-                  const pretty = m.dir !== 'sys' ? tryJson(m.text) : null;
-                  return (
-                    <div key={m.id} className={`feed-item ws-${m.dir}`}>
-                      <span className="feed-ch">{m.dir === 'in' ? '↓ recv' : m.dir === 'out' ? '↑ sent' : '•'}</span>
-                      <span className="feed-time">{new Date(m.at).toLocaleTimeString()}</span>
-                      <div className="feed-msg break">{pretty ?? m.text}</div>
-                    </div>
-                  );
-                })}
+                {shown.map((m) => (
+                  <FeedRow
+                    key={m.id}
+                    tone={`ws-${m.dir}`}
+                    channel={m.dir === 'in' ? '↓ received' : m.dir === 'out' ? '↑ sent' : 'event'}
+                    at={m.at}
+                    text={m.text}
+                    pretty={m.dir !== 'sys'}
+                  />
+                ))}
               </div>
             )}
-          </div>
+          </Section>
         </div>
       </div>
     </div>

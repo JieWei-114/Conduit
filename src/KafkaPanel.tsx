@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
+import { ConnPill, Empty, FeedRow, PanelHead, ReqTabs, Section, persistLater } from './ui';
 
 const LS_CONN = 'conduit.kafka.conn.v1';
 const LS_CONNS = 'conduit.kafka.conns.v1';
@@ -65,16 +66,6 @@ function loadJson<T>(key: string, fallback: T): T {
     return fallback;
   }
 }
-function tryJson(s: unknown): string | null {
-  if (typeof s !== 'string') return null;
-  const t = s.trim();
-  if (!(t.startsWith('{') || t.startsWith('['))) return null;
-  try {
-    return JSON.stringify(JSON.parse(t), null, 2);
-  } catch {
-    return null;
-  }
-}
 function loadTabs(): { tabs: KTab[]; activeId: number } {
   try {
     const raw = JSON.parse(localStorage.getItem(LS_TABS) ?? 'null');
@@ -120,8 +111,8 @@ export default function KafkaPanel() {
     setA(k, v);
   };
 
-  useEffect(() => localStorage.setItem(LS_CONN, JSON.stringify(conn)), [conn]);
-  useEffect(() => localStorage.setItem(LS_TABS, JSON.stringify({ tabs, activeId })), [tabs, activeId]);
+  useEffect(() => persistLater(LS_CONN, () => JSON.stringify(conn)), [conn]);
+  useEffect(() => persistLater(LS_TABS, () => JSON.stringify({ tabs, activeId })), [tabs, activeId]);
   useEffect(() => () => esRefs.current.forEach((es) => es.close()), []);
 
   const persistConns = (next: SavedConn[]) => {
@@ -246,7 +237,6 @@ export default function KafkaPanel() {
         : cs === 'error'
           ? `Error — ${csMsg}`
           : 'Disconnected';
-  const connCls = cs === 'live' ? 'status ok' : cs === 'error' ? 'status bad' : 'status';
   const rawFeed = feeds[active.id] ?? [];
   const fq = (feedFilter[active.id] ?? '').trim().toLowerCase();
   const shownFeed = fq
@@ -260,69 +250,45 @@ export default function KafkaPanel() {
 
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs" role="tablist" aria-label="Kafka tabs">
-        {tabs.map((t) => (
-          <button
-            type="button"
-            key={t.id}
-            className={`req-tab ${t.id === activeId ? 'active' : ''}`}
-            role="tab"
-            aria-selected={t.id === activeId}
-            onClick={() => setActiveId(t.id)}
-            title={t.topic}
-          >
-            {connMap[t.id]?.s === 'live' ? '🟢 ' : connMap[t.id]?.s === 'connecting' ? '🟡 ' : connMap[t.id]?.s === 'error' ? '🔴 ' : ''}
-            {tabLabel(t)}
-            {tabs.length > 1 && (
-              // Lives inside the tab button, so it stays a role="button" span:
-              // a button cannot contain another button.
-              <i
-                className="chip-x"
-                role="button"
-                tabIndex={0}
-                aria-label="Close this tab"
-                title="Close this tab"
-                onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    closeTab(t.id);
-                  }
-                }}
-              > ✕</i>
-            )}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="req-tab req-tab-add"
-          aria-label="New tab (shares this connection)"
-          title="New tab (shares this connection)"
-          onClick={addTab}
-        >+</button>
-      </div>
+      <ReqTabs
+        tabs={tabs}
+        activeId={activeId}
+        ariaLabel="Kafka tabs"
+        label={tabLabel}
+        title={(t) => t.topic}
+        state={(t) => {
+          const s = connMap[t.id]?.s;
+          return s === 'idle' ? undefined : s;
+        }}
+        onSelect={setActiveId}
+        onClose={closeTab}
+        onAdd={addTab}
+        addTitle="New tab (same connection)"
+      />
 
       <div className="layout">
         <div className="left">
-          <h3>
-            Kafka <span className="badge">rdkafka</span>
-          </h3>
+          <PanelHead
+            title="Kafka"
+            badge="rdkafka"
+            tagline="Connect to brokers, pick a topic, then consume live or produce a record. Each tab is its own consumer."
+          />
 
-          <label>Saved connection</label>
-          <div className="row field-row">
+          <div className="saved-bar">
             <select
-              className="grow"
               value={picked}
+              aria-label="Saved connections"
               onChange={(e) => {
                 setPicked(e.target.value);
                 const c = conns.find((x) => x.name === e.target.value);
                 if (c) setConnState_({ brokers: c.brokers, ssl: c.ssl, saslUser: c.saslUser, saslPass: c.saslPass });
               }}
             >
-              <option value=""> - </option>
+              <option value="">{conns.length ? 'Open a saved connection…' : 'No saved connections yet'}</option>
               {conns.map((c) => (
-                <option key={c.name} value={c.name}>{c.name}</option>
+                <option key={c.name} value={c.name}>
+                  {c.name}
+                </option>
               ))}
             </select>
             <SaveAs
@@ -334,61 +300,88 @@ export default function KafkaPanel() {
               }}
               onMessage={flash}
             />
-            <button className="btn-field btn-danger" disabled={!picked} onClick={() => { persistConns(conns.filter((c) => c.name !== picked)); setPicked(''); }}>
+            <button
+              className="btn-secondary btn-danger"
+              disabled={!picked}
+              onClick={() => {
+                persistConns(conns.filter((c) => c.name !== picked));
+                setPicked('');
+              }}
+            >
               Delete
             </button>
           </div>
           {flashMsg && <div className="toast">{flashMsg}</div>}
-          <div className="hint">Shared across every tab in this panel.</div>
 
-          <label>Brokers</label>
-          <div className="row field-row">
-            <input className="grow" value={conn.brokers} spellCheck={false} placeholder="localhost:9092" onChange={(e) => setConn('brokers', e.target.value)} />
-            <button className="btn-field" onClick={listTopics}>List topics</button>
-          </div>
-          <div className="hint">One or more <code>host:port</code>, comma-separated.</div>
+          <Section title="Connection" hint="Shared by every tab in this panel.">
+            <label className="field-first">Brokers</label>
+            <div className="row row-tight">
+              <input
+                className="grow"
+                value={conn.brokers}
+                spellCheck={false}
+                placeholder="localhost:9092"
+                onChange={(e) => setConn('brokers', e.target.value)}
+              />
+              <button className="btn-secondary" onClick={listTopics}>
+                List topics
+              </button>
+            </div>
+            <div className="hint">
+              One or more <code>host:port</code>, comma-separated.
+            </div>
+            <div className="conn-row">
+              <div className="grow">
+                <label>SASL user</label>
+                <input placeholder="optional" value={conn.saslUser} onChange={(e) => setConn('saslUser', e.target.value)} />
+              </div>
+              <div className="grow">
+                <label>SASL password</label>
+                <input type="password" placeholder="optional" value={conn.saslPass} onChange={(e) => setConn('saslPass', e.target.value)} />
+              </div>
+              <label className="check" title="Connect to the brokers over SSL">
+                <input type="checkbox" checked={conn.ssl} onChange={(e) => setConn('ssl', e.target.checked)} />
+                SSL
+              </label>
+            </div>
+            {status && <div className={status.startsWith('✗') || status.includes('error') ? 'error break' : 'hint'}>{status.replace(/^✗ /, '')}</div>}
+          </Section>
 
-          <label>Transport</label>
-          <div className="inline">
-            <button
-              className={`btn-field ${conn.ssl ? 'btn-on' : ''}`}
-              title="Connect to the brokers over SSL"
-              onClick={() => setConn('ssl', !conn.ssl)}
-            >
-              SSL
-            </button>
-          </div>
-          <div className="row field-row field-row-gap">
-            <input placeholder="SASL user (optional)" value={conn.saslUser} onChange={(e) => setConn('saslUser', e.target.value)} />
-            <input type="password" placeholder="SASL password" value={conn.saslPass} onChange={(e) => setConn('saslPass', e.target.value)} />
-          </div>
-
-          {topics.length > 0 && (
-            <>
-              <label>Topics <span className="count">({topics.length})</span></label>
-              {/* Rows are a mouse shortcut only: a cluster can list hundreds of
-                  topics, and the Topic field on the right offers the same
-                  choice from a datalist for keyboard users. */}
+          <Section
+            title={
+              <>
+                Topics {topics.length > 0 && <span className="count">({topics.length})</span>}
+              </>
+            }
+          >
+            {topics.length > 0 ? (
               <div className="keylist">
                 {topics.map((t) => (
-                  <div key={t} className={`keyrow ${t === active.topic ? 'keyrow-active' : ''}`} onClick={() => editConsumeField('topic', t)} title="Select this topic for the active tab">
+                  <div
+                    key={t}
+                    className={`keyrow ${t === active.topic ? 'keyrow-active' : ''}`}
+                    onClick={() => editConsumeField('topic', t)}
+                    title="Use this topic in the current tab"
+                  >
                     <span className="kname">{t}</span>
                   </div>
                 ))}
               </div>
-            </>
-          )}
-
-          {status && <div className="hint">{status}</div>}
+            ) : (
+              <div className="hint m-0">Press List topics to load them, then click one to use it in this tab.</div>
+            )}
+          </Section>
         </div>
 
         <div className="right">
-          <label>Topic <span className="count">(this tab)</span></label>
+          <label className="field-first">
+            Topic <span className="count">(this tab)</span>
+          </label>
           <input
             list="kafka-topics-r"
             value={active.topic}
             spellCheck={false}
-            placeholder="my-topic"
+            placeholder="orders"
             onChange={(e) => setA('topic', e.target.value)}
           />
           <datalist id="kafka-topics-r">
@@ -397,7 +390,7 @@ export default function KafkaPanel() {
             ))}
           </datalist>
 
-          <div className="tabs mt-3" role="tablist" aria-label="Direction">
+          <div className="tabs mt-4" role="tablist" aria-label="Direction">
             <button
               type="button"
               className={rtab === 'consume' ? 'tab active' : 'tab'}
@@ -405,7 +398,7 @@ export default function KafkaPanel() {
               aria-selected={rtab === 'consume'}
               onClick={() => setRtab('consume')}
             >
-              Consume {isConsuming ? '🟢' : ''}
+              Consume {isConsuming && <span className="dot live" />}
             </button>
             <button
               type="button"
@@ -419,92 +412,128 @@ export default function KafkaPanel() {
           </div>
 
           <div hidden={rtab !== 'produce'}>
-            <label>Key</label>
-            <input placeholder="player-123" value={active.key} spellCheck={false} onChange={(e) => setA('key', e.target.value)} />
-            <div className="hint">Optional. Decides the partition and the ordering group.</div>
+            <div className="conn-row mt-0">
+              <div className="grow">
+                <label className="field-first">Key</label>
+                <input placeholder="order-123" value={active.key} spellCheck={false} onChange={(e) => setA('key', e.target.value)} />
+              </div>
+            </div>
+            <div className="hint">Optional. Picks the partition, so records with the same key stay in order.</div>
             <label>Headers</label>
-            <textarea rows={3} value={active.headers} spellCheck={false} placeholder="trace-id: abc" onChange={(e) => setA('headers', e.target.value)} />
-            <div className="hint">Per-message metadata. One <code>k: v</code> per line.</div>
+            <textarea rows={2} value={active.headers} spellCheck={false} placeholder="trace-id: abc" onChange={(e) => setA('headers', e.target.value)} />
+            <div className="hint">
+              Per-record metadata, one <code>name: value</code> per line.
+            </div>
             <label>Value</label>
             <textarea
               rows={7}
               value={active.value}
               spellCheck={false}
-              placeholder='{"event":"something-happened"}'
+              placeholder='{"event":"order-created"}'
               onChange={(e) => setA('value', e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) produce(); }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) produce();
+              }}
             />
-            <div className="hint">JSON or plain text. <kbd>⌘</kbd>/<kbd>Ctrl</kbd> + <kbd>Enter</kbd> sends.</div>
-            <button onClick={produce}>Send</button>
+            <div className="inline mt-2">
+              <button className="btn-primary" disabled={!active.topic.trim()} onClick={produce}>
+                Send record
+              </button>
+              <span className="hint m-0">
+                JSON or plain text. <kbd>⌘↵</kbd> sends.
+              </span>
+            </div>
           </div>
 
           <div hidden={rtab !== 'consume'}>
-            <label>Consume</label>
-            <div className="row field-row">
-              <input className="grow" placeholder="group id (blank = auto, throwaway)" value={active.group} onChange={(e) => setA('group', e.target.value)} />
-              <button
-                className={`btn-field ${active.fromBeginning ? 'btn-on' : ''}`}
-                title="Read the topic from the earliest retained offset instead of the newest"
-                onClick={() => editConsumeField('fromBeginning', !active.fromBeginning)}
-              >
+            <div className="row">
+              <input
+                className="grow"
+                placeholder="group id (blank = throwaway group)"
+                aria-label="Consumer group id"
+                value={active.group}
+                onChange={(e) => setA('group', e.target.value)}
+              />
+              <label className="check" title="Read the topic from the earliest retained offset instead of the newest">
+                <input
+                  type="checkbox"
+                  checked={active.fromBeginning}
+                  onChange={(e) => editConsumeField('fromBeginning', e.target.checked)}
+                />
                 From beginning
-              </button>
-              <button className={`btn-field ${isConsuming ? 'btn-on' : ''}`} onClick={() => toggleConsume(active.id)}>
+              </label>
+              <button
+                className={isConsuming ? 'btn-secondary btn-on' : 'btn-primary'}
+                disabled={!isConsuming && !active.topic.trim()}
+                onClick={() => toggleConsume(active.id)}
+              >
                 {isConsuming ? 'Disconnect' : 'Connect'}
               </button>
             </div>
-            <div className="hint">Every other tab keeps streaming in the background.</div>
-            <div className={`${connCls} mt-2`}>{connText}</div>
+            <div className="inline mt-2">
+              <ConnPill state={cs} text={cs === 'error' ? 'Error' : connText} />
+              <span className="hint m-0">Other tabs keep streaming in the background.</span>
+            </div>
+            {cs === 'error' && csMsg && <div className="error">{csMsg}</div>}
+
             {rawFeed.length === 0 && cs !== 'live' && (
-              <div className="empty mt-3">
-                <div className="empty-icon">◈</div>
-                <div className="empty-title">Not consuming</div>
-                <div className="empty-hint">Set a topic and press <kbd>Connect</kbd> to stream messages here.</div>
-              </div>
+              <Empty
+                className="mt-3"
+                icon="⇣"
+                title="Not consuming"
+                hint={
+                  <>
+                    Set a topic above (or click one on the left after List topics) and press <kbd>Connect</kbd>. New records
+                    stream in here.
+                  </>
+                }
+              />
             )}
             {rawFeed.length === 0 && cs === 'live' && (
-              <div className="empty mt-3">
-                <div className="empty-icon">◈</div>
-                <div className="empty-title">Connected, no messages yet</div>
-                <div className="empty-hint">Records written to this topic will appear here. Produce one from the Produce tab to check the path end to end.</div>
-              </div>
+              <Empty
+                className="mt-3"
+                icon="⇣"
+                title="Connected, no records yet"
+                hint="Records written to this topic will appear here. Produce one from the Produce tab to check the path end to end."
+              />
             )}
             {rawFeed.length > 0 && (
               <>
-                <div className="feed-head inline">
-                  <span className="count">{fq ? `${shownFeed.length} / ${rawFeed.length}` : rawFeed.length} messages</span>
+                <div className="feed-head">
+                  <span className="count">{fq ? `${shownFeed.length} / ${rawFeed.length}` : rawFeed.length} records</span>
                   <input
                     className="grow"
-                    placeholder="filter messages"
+                    placeholder="Filter records"
+                    aria-label="Filter records"
                     value={feedFilter[active.id] ?? ''}
                     spellCheck={false}
                     onChange={(e) => setFeedFilter((f) => ({ ...f, [active.id]: e.target.value }))}
                   />
-                  <button className="btn-field btn-danger" title="Discard the messages received so far" onClick={() => setFeeds((f) => ({ ...f, [active.id]: [] }))}>Clear</button>
+                  <button
+                    className="btn-ghost btn-sm"
+                    title="Discard the records received so far"
+                    onClick={() => setFeeds((f) => ({ ...f, [active.id]: [] }))}
+                  >
+                    Clear
+                  </button>
                 </div>
                 <div className="feed">
-                  {shownFeed.map((m) => {
-                    const pretty = tryJson(m.payload);
-                    const hdrs = m.headers && Object.keys(m.headers).length ? m.headers : null;
-                    return (
-                      <div key={`${m.partition}-${m.offset}`} className="feed-item">
-                        <span className="feed-ch">
-                          p{m.partition} · offset {m.offset}
-                          {m.key ? ` · key ${m.key}` : ''}
-                        </span>
-                        <span className="feed-time">{new Date(m.at).toLocaleTimeString()}</span>
-                        {hdrs && (
-                          <div className="feed-props">
-                            {Object.entries(hdrs).map(([k, v]) => `${k}: ${v}`).join('  ·  ')}
-                          </div>
-                        )}
-                        <div className="feed-msg break">{pretty ?? m.payload}</div>
-                        <div className="inline mt-1">
-                          <button className="btn-field" title="Copy this record's value to the clipboard" onClick={() => navigator.clipboard.writeText(m.payload)}>Copy</button>
-                        </div>
-                      </div>
-                    );
-                  })}
+                  {shownFeed.map((m) => (
+                    <FeedRow
+                      key={`${m.partition}-${m.offset}`}
+                      channel={`p${m.partition} · offset ${m.offset}${m.key ? ` · key ${m.key}` : ''}`}
+                      at={m.at}
+                      text={m.payload}
+                      meta={
+                        m.headers && Object.keys(m.headers).length
+                          ? Object.entries(m.headers)
+                              .map(([k, v]) => `${k}: ${v}`)
+                              .join('  ·  ')
+                          : undefined
+                      }
+                      copy
+                    />
+                  ))}
                 </div>
               </>
             )}

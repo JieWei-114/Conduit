@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Section } from './ui';
 
 /**
  * Reusable auth block: Bearer (JWT) / Basic / Raw header / OAuth2
@@ -129,72 +130,78 @@ export default function AuthBox({
   };
 
   return (
-    <div>
-      <label>Auth</label>
-      <select value={a.type} onChange={(e) => set('type', e.target.value as AuthState['type'])}>
-        <option value="bearer">Bearer (JWT / token)</option>
-        <option value="basic">Basic (username + password)</option>
-        <option value="raw">Raw Authorization value</option>
-        <option value="oauth2">OAuth2 client-credentials</option>
-        <option value="none">None</option>
-      </select>
-
+    <Section
+      title="Auth"
+      actions={
+        <select
+          className="w-lg"
+          aria-label="Auth type"
+          value={a.type}
+          onChange={(e) => set('type', e.target.value as AuthState['type'])}
+        >
+          <option value="bearer">Bearer token</option>
+          <option value="basic">Basic (user + password)</option>
+          <option value="raw">Raw Authorization value</option>
+          <option value="oauth2">OAuth2 client credentials</option>
+          <option value="none">None</option>
+        </select>
+      }
+    >
       {(a.type === 'bearer' || a.type === 'oauth2') && (
         <>
           {a.type === 'oauth2' && (
             <>
-              <label>Token endpoint</label>
+              <label className="field-first">Token endpoint</label>
               <input value={a.oauthIssuer} spellCheck={false} placeholder="https://auth.example.com/oauth/token"
                 onChange={(e) => set('oauthIssuer', e.target.value)} />
-              <div className="hint">the issuer URL that exchanges credentials for a token</div>
-              <div className="row field-row field-row-gap">
+              <div className="hint">The issuer URL that exchanges client credentials for a token.</div>
+              <div className="row mt-2">
                 <input placeholder="client_id" value={a.oauthClientId} spellCheck={false}
                   onChange={(e) => set('oauthClientId', e.target.value)} />
                 <input type="password" placeholder="client_secret" value={a.oauthClientSecret}
                   onChange={(e) => set('oauthClientSecret', e.target.value)} />
               </div>
-              <div className="row field-row field-row-gap">
+              <div className="row mt-2">
                 <input className="grow" placeholder="audience (optional)" value={a.oauthAudience} spellCheck={false}
                   onChange={(e) => set('oauthAudience', e.target.value)} />
-                <button className="btn-field" title="Exchange the client credentials for an access token"
+                <button className="btn-secondary" title="Exchange the client credentials for an access token"
                   disabled={!a.oauthIssuer.trim()} onClick={fetchToken}>
-                  get token
+                  Get token
                 </button>
               </div>
               {oauthStatus && <div className="hint">{oauthStatus}</div>}
             </>
           )}
-          <label>Token</label>
-          <textarea rows={5} value={a.bearer} placeholder="eyJhbGciOi..." spellCheck={false}
+          {a.type === 'oauth2' && <label>Token</label>}
+          <textarea rows={3} aria-label="Token" value={a.bearer} placeholder="eyJhbGciOi..." spellCheck={false}
             onChange={(e) => set('bearer', e.target.value)} />
           <div className="hint">
             {a.type === 'oauth2'
-              ? 'filled in by "get token", or paste one here'
-              : 'the "Bearer " prefix is added automatically'}
+              ? 'Filled in by Get token, or paste one here.'
+              : 'Sent as Authorization: Bearer <token>. Paste the token only; a JWT is decoded below.'}
           </div>
         </>
       )}
 
       {a.type === 'basic' && (
         <>
-          <div className="row field-row field-row-gap">
+          <div className="row">
             <input placeholder="username" value={a.basicUser} spellCheck={false}
               onChange={(e) => set('basicUser', e.target.value)} />
             <input type="password" placeholder="password" value={a.basicPass}
               onChange={(e) => set('basicPass', e.target.value)} />
           </div>
           {(a.basicUser || a.basicPass) && (
-            <div className="hint">sends: Authorization: Basic {b64utf8(`${a.basicUser}:${a.basicPass}`)}</div>
+            <div className="hint break">Sends Authorization: Basic {b64utf8(`${a.basicUser}:${a.basicPass}`)}</div>
           )}
         </>
       )}
 
       {a.type === 'raw' && (
         <>
-          <label>Authorization value</label>
-          <input value={a.raw} spellCheck={false} placeholder="Token abc123  ·  Bearer xyz  ·  custom-scheme …"
+          <input aria-label="Authorization value" value={a.raw} spellCheck={false} placeholder="Token abc123  ·  Bearer xyz  ·  custom-scheme …"
             onChange={(e) => set('raw', e.target.value)} />
-          <div className="hint">sent verbatim as the whole header value, any scheme</div>
+          <div className="hint">Sent as the whole Authorization header value, any scheme.</div>
         </>
       )}
 
@@ -203,9 +210,9 @@ export default function AuthBox({
           <table className="jwt-table">
             <tbody>
               <tr>
-                <td className="jwt-k">status</td>
+                <td className="jwt-k">JWT</td>
                 <td className={jwtExpired ? 'jwt-exp' : 'jwt-ok'}>
-                  {jwtExpired ? '⚠ EXPIRED' : '✓ valid'}
+                  {jwtExpired ? 'expired' : 'not expired'}
                 </td>
               </tr>
               <tr>
@@ -231,6 +238,6 @@ export default function AuthBox({
           </table>
         </div>
       )}
-    </div>
+    </Section>
   );
 }

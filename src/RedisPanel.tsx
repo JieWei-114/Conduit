@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import { useArmedConfirm } from './useArmedConfirm';
 import type { RedisKeyView, RedisType } from './types';
+import { Empty, FeedRow, PanelHead, Section, tryJson, useStableCallback } from './ui';
+import { EXAMPLES, useExample } from './examples';
 
 const LS_CONNS = 'conduit.redis.conns.v3';
 const LS_LAST = 'conduit.redis.last.v2';
@@ -70,17 +72,6 @@ function loadConns(): Conn[] {
   }
 }
 
-/** Pretty-print if the string is a JSON object/array; else return null. */
-function tryJson(s: unknown): string | null {
-  if (typeof s !== 'string') return null;
-  const t = s.trim();
-  if (!(t.startsWith('{') || t.startsWith('['))) return null;
-  try {
-    return JSON.stringify(JSON.parse(t), null, 2);
-  } catch {
-    return null;
-  }
-}
 
 // never rejects — a network drop / non-JSON 500 comes back as { ok:false, error }
 // so every caller's `if (!r.ok)` path handles it uniformly.
@@ -247,7 +238,11 @@ export default function RedisPanel() {
 
   const ping = async () => {
     const r = await post('ping', { url });
-    setStatus(r.ok ? `PONG ✓` : `✗ ${r.error}`);
+    setStatus(
+      r.ok
+        ? `PONG ✓${r.cluster ? ` · cluster, ${r.masters} masters` : ''}${r.note ? ` · ⚠ ${r.note}` : ''}`
+        : `✗ ${r.error}`,
+    );
   };
 
   const openKey = async (key: string) => {
@@ -323,20 +318,51 @@ export default function RedisPanel() {
 
   useEffect(() => () => esRef.current?.close(), []);
 
+  const [scanSoon, setScanSoon] = useState(false);
+  useEffect(() => {
+    if (!scanSoon) return;
+    setScanSoon(false);
+    loadChildren('');
+  }, [scanSoon]);
+  const exampleArm = useArmedConfirm();
+  const isExampleConn = (ex: typeof EXAMPLES.redis) =>
+    (!host.trim() || host.trim() === ex.host) && (!port.trim() || port.trim() === ex.port) && !password && !db;
+  const applyExample = (ex: typeof EXAMPLES.redis) => {
+    exampleArm.disarm();
+    setHost(ex.host);
+    setPort(ex.port);
+    setPassword('');
+    setDb('');
+    setPath('');
+    setRtab('value');
+    setScanSoon(true);
+  };
+  const clickExample = (ex: typeof EXAMPLES.redis) => {
+    if (isExampleConn(ex) || exampleArm.isArmed('example')) applyExample(ex);
+    else exampleArm.arm('example');
+  };
+  useExample<typeof EXAMPLES.redis>('redis', (ex) => {
+    if (isExampleConn(ex)) return applyExample(ex);
+    setRtab('value');
+    flash(`Kept your connection to ${host}:${port}; the ${ex.host}:${ex.port} example was not applied.`);
+  });
+
   return (
     <div className="layout">
-      {/* ── left: connection + scan + key list (shared by Value & Commands) ── */}
       <div className="left">
-        <h3>
-          Redis <span className="badge">redis-rs</span>
-        </h3>
+        <PanelHead
+          title="Redis"
+          badge="redis-rs"
+          tagline="Browse keys by prefix, view and edit values, run commands, and watch Pub/Sub."
+        />
 
-        <label>Saved connections</label>
-        <div className="row field-row">
-          <select className="grow" value={pickedConn} onChange={(e) => applyConn(e.target.value)}>
-            <option value=""> - </option>
+        <div className="saved-bar">
+          <select value={pickedConn} aria-label="Saved connections" onChange={(e) => applyConn(e.target.value)}>
+            <option value="">{conns.length ? 'Open a saved connection…' : 'No saved connections yet'}</option>
             {conns.map((c) => (
-              <option key={c.name} value={c.name}>{c.name}</option>
+              <option key={c.name} value={c.name}>
+                {c.name}
+              </option>
             ))}
           </select>
           <SaveAs
@@ -349,147 +375,153 @@ export default function RedisPanel() {
             onMessage={flash}
           />
           <button
-            className="btn-field btn-danger"
+            className="btn-secondary btn-danger"
             disabled={!pickedConn}
             onClick={deleteConn}
             title="Delete the selected saved connection"
           >
-            delete
+            Delete
           </button>
         </div>
         {flashMsg && <div className="toast">{flashMsg}</div>}
 
-        <div className="conn-row">
-          <div className="grow">
-            <label>Host</label>
-            <input value={host} spellCheck={false} placeholder="host  or  redis://host:port"
-              onChange={(e) => setHost(e.target.value)} />
+        <Section title="Connection">
+          <div className="conn-row mt-0">
+            <div className="grow">
+              <label>Host</label>
+              <input
+                value={host}
+                spellCheck={false}
+                placeholder="127.0.0.1 or redis://host:port"
+                onChange={(e) => setHost(e.target.value)}
+              />
+            </div>
+            <div className="conn-sm">
+              <label>Port</label>
+              <input value={port} placeholder="6379" onChange={(e) => setPort(e.target.value)} />
+            </div>
           </div>
-          <div className="conn-sm">
-            <label>Port</label>
-            <input value={port} onChange={(e) => setPort(e.target.value)} />
+          <div className="conn-row">
+            <div className="grow">
+              <label>Password</label>
+              <input
+                type="password"
+                value={password}
+                spellCheck={false}
+                placeholder="blank if none"
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <div className="conn-sm">
+              <label>DB</label>
+              <input value={db} placeholder="0" onChange={(e) => setDb(e.target.value)} />
+            </div>
+            <button className="btn-secondary" onClick={ping} title="Send PING to check the connection">
+              Ping
+            </button>
           </div>
-        </div>
-        <div className="conn-row">
-          <div className="grow">
-            <label>Password</label>
-            <input type="password" value={password} spellCheck={false} placeholder="blank if none"
-              onChange={(e) => setPassword(e.target.value)} />
-          </div>
-          <div className="conn-sm">
-            <label>DB</label>
-            <input value={db} placeholder="0" onChange={(e) => setDb(e.target.value)} />
-          </div>
-          <button className="btn-field" onClick={ping} title="Send PING to check the connection">ping</button>
-        </div>
-        <div className="hint">{url.replace(/:\/\/:[^@]*@/, '://:***@')}</div>
+          <div className="hint mono break">{url.replace(/:\/\/:[^@]*@/, '://:***@')}</div>
+          {status && <div className={status.startsWith('✗') ? 'error break' : 'hint text-ok'}>{status.replace(/^✗ /, '')}</div>}
+        </Section>
 
-        <label>Key or prefix</label>
-        <input
-          value={path}
-          spellCheck={false}
-          placeholder="*:*:* or *_*_*"
-          onChange={(e) => setPath(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && go()}
-        />
-        <div className="hint">
-          An exact key opens its value; anything else is browsed as a prefix. <kbd>Enter</kbd> also scans.
-        </div>
-        <button onClick={go} title="Open this exact key, or browse it as a prefix">Scan ▶</button>
+        <Section title="Keys" hint="An exact key opens its value; anything else is browsed as a prefix. Leave it empty to list the top level.">
+          <div className="row row-tight">
+            <input
+              className="grow"
+              value={path}
+              spellCheck={false}
+              aria-label="Key or prefix"
+              placeholder="user:  or  session:42"
+              onChange={(e) => setPath(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && go()}
+            />
+            <button className="btn-primary" onClick={go} title="Open this exact key, or browse it as a prefix">
+              Scan
+            </button>
+          </div>
 
-        {children.length > 0 && (
-          <>
-            <div className="crumbs">
-              <button
-                type="button"
-                className="crumb"
-                title="Browse from the root prefix"
-                onClick={() => crumbTo('')}
-              >
-                root
-              </button>
-              {path
-                .replace(/:$/, '')
-                .split(':')
-                .filter(Boolean)
-                .flatMap((seg, i, arr) => {
-                  const prefix = arr.slice(0, i + 1).join(':') + ':';
-                  return [
-                    <span key={`sep-${i}`} className="crumb-sep">/</span>,
-                    <button
-                      type="button"
-                      key={`seg-${i}`}
-                      className="crumb"
-                      title={`Browse ${prefix}`}
-                      onClick={() => crumbTo(prefix)}
+          {children.length > 0 && (
+            <>
+              <div className="crumbs">
+                <button type="button" className="crumb" title="Browse from the top level" onClick={() => crumbTo('')}>
+                  root
+                </button>
+                {path
+                  .replace(/:$/, '')
+                  .split(':')
+                  .filter(Boolean)
+                  .flatMap((seg, i, arr) => {
+                    const prefix = arr.slice(0, i + 1).join(':') + ':';
+                    return [
+                      <span key={`sep-${i}`} className="crumb-sep">
+                        /
+                      </span>,
+                      <button type="button" key={`seg-${i}`} className="crumb" title={`Browse ${prefix}`} onClick={() => crumbTo(prefix)}>
+                        {seg}
+                      </button>,
+                    ];
+                  })}
+              </div>
+              <input
+                placeholder="Filter this level"
+                aria-label="Filter this level"
+                value={levelFilter}
+                onChange={(e) => setLevelFilter(e.target.value)}
+              />
+            </>
+          )}
+
+          {children.length === 0 ? (
+            <Empty
+              compact
+              className="mt-3"
+              title="No keys listed yet"
+              hint={
+                <>
+                  Press <kbd>Scan</kbd> with the box empty to list the top level, or type a prefix like <code>user:</code>.
+                </>
+              }
+            />
+          ) : (
+            <div className="keylist">
+              {children
+                .filter((ch) => (levelFilter ? ch.seg.toLowerCase().includes(levelFilter.toLowerCase()) : true))
+                .map((ch) => {
+                  const color = ch.isKey ? TYPE_COLORS[ch.type ?? ''] ?? 'var(--text-dim)' : 'var(--text-dim)';
+                  const badge = ch.isKey ? ch.type : 'dir';
+                  return (
+                    <div
+                      key={ch.full}
+                      className={`keyrow ${view?.key === ch.full ? 'keyrow-active' : ''}`}
+                      title={ch.hasChildren ? `Browse inside ${ch.full}` : `Open ${ch.full}`}
+                      onClick={() => (ch.hasChildren ? drill(ch.full) : openKey(ch.full))}
                     >
-                      {seg}
-                    </button>,
-                  ];
+                      <span className="tbadge" style={{ background: `color-mix(in srgb, ${color} 18%, transparent)`, color }}>
+                        {badge}
+                      </span>
+                      <span className="kname">{ch.seg}</span>
+                      <span className="kcount">
+                        {ch.count}
+                        {ch.hasChildren ? ' ›' : ''}
+                      </span>
+                      {ch.isKey && ch.hasChildren && (
+                        <span
+                          className="open-mini"
+                          title={`Open the value of ${ch.full} instead of browsing into it`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openKey(ch.full);
+                          }}
+                        >
+                          open
+                        </span>
+                      )}
+                    </div>
+                  );
                 })}
             </div>
-
-            <input
-              className="mb4"
-              placeholder="filter this level"
-              value={levelFilter}
-              onChange={(e) => setLevelFilter(e.target.value)}
-            />
-          </>
-        )}
-
-        {children.length === 0 ? (
-          <div className="empty mt-3">
-            <div className="empty-icon">◇</div>
-            <div className="empty-title">No keys loaded</div>
-            <div className="empty-hint">
-              Enter a pattern like <kbd>user:*</kbd> in the key box above and press Scan to list this level.
-            </div>
-          </div>
-        ) : (
-          // Key rows are a mouse shortcut only: a scan can list hundreds of
-          // them, so they are not tab stops. The key box above reaches any key
-          // or prefix from the keyboard — an exact key opens its value, a
-          // prefix browses that level.
-          <div className="keylist">
-            {children
-              .filter((ch) => (levelFilter ? ch.seg.toLowerCase().includes(levelFilter.toLowerCase()) : true))
-              .map((ch) => {
-                const color = ch.isKey ? TYPE_COLORS[ch.type ?? ''] ?? 'var(--text-dim)' : 'var(--text-dim)';
-                const badge = ch.isKey ? ch.type : 'dir';
-                return (
-                  <div
-                    key={ch.full}
-                    className={`keyrow ${view?.key === ch.full ? 'keyrow-active' : ''}`}
-                    title={ch.hasChildren ? `Browse inside ${ch.full}` : `Open ${ch.full}`}
-                    onClick={() => (ch.hasChildren ? drill(ch.full) : openKey(ch.full))}
-                  >
-                    {/* the type colour is data-driven, so it cannot come from a class */}
-                    <span className="tbadge" style={{ background: color + '33', color }}>{badge}</span>
-                    <span className="kname">{ch.seg}</span>
-                    <span className="kcount">
-                      {ch.count}
-                      {ch.hasChildren ? ' ›' : ''}
-                    </span>
-                    {ch.isKey && ch.hasChildren && (
-                      <span
-                        className="open-mini"
-                        title={`Open the value of ${ch.full} instead of browsing into it`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openKey(ch.full);
-                        }}
-                      >
-                        open
-                      </span>
-                    )}
-                  </div>
-                );
-              })}
-          </div>
-        )}
-
-        {status && <div className="hint">{status}</div>}
+          )}
+        </Section>
       </div>
 
       {/* ── right: three clear tabs ── */}
@@ -535,13 +567,25 @@ export default function RedisPanel() {
               onLoadMore={loadMoreValue}
             />
           ) : (
-            <div className="empty">
-              <div className="empty-icon">◇</div>
-              <div className="empty-title">No value selected</div>
-              <div className="empty-hint">
-                Scan a prefix on the left, then click a key row to view, edit and expire its value.
-              </div>
-            </div>
+            <Empty
+              icon="⌗"
+              title="No key open"
+              hint={
+                <>
+                  Connect on the left (default <code>127.0.0.1:6379</code>), press <kbd>Scan</kbd>, then click a key to view,
+                  edit and expire its value.
+                </>
+              }
+            >
+              <button
+                className="btn-secondary btn-sm"
+                onClick={() => clickExample(EXAMPLES.redis)}
+                onMouseLeave={exampleArm.disarm}
+                onBlur={exampleArm.disarm}
+              >
+                {exampleArm.showsArmed('example') ? 'Click again to replace your connection' : 'Scan 127.0.0.1:6379'}
+              </button>
+            </Empty>
           )}
         </div>
 
@@ -550,61 +594,68 @@ export default function RedisPanel() {
         </div>
 
         <div hidden={rtab !== 'pubsub'}>
-          <div>
-            <div className="hint mb-2">
-              Pub/Sub is independent of keys — publish to a channel or listen live.
+          <Section flush title="Publish" hint="Pub/Sub is independent of keys. Send a message to a channel, or listen below.">
+            <div className="row">
+              <input className="w-md" placeholder="channel" aria-label="Channel" value={channel} onChange={(e) => setChannel(e.target.value)} />
+              <input
+                className="grow"
+                placeholder='{"event":"ping"}'
+                aria-label="Message"
+                value={pubMsg}
+                spellCheck={false}
+                onChange={(e) => setPubMsg(e.target.value)}
+              />
+              <button className="btn-secondary" onClick={publish} title="Publish this message to the channel">
+                Publish
+              </button>
             </div>
-            <label>Publish</label>
-            <div className="row field-row">
-              <input className="w-md" placeholder="channel" value={channel} onChange={(e) => setChannel(e.target.value)} />
-              <input className="grow" placeholder='{"messageType":...}' value={pubMsg} spellCheck={false} onChange={(e) => setPubMsg(e.target.value)} />
-              <button className="btn-field" onClick={publish} title="Publish this message to the channel">publish</button>
-            </div>
+          </Section>
 
-            <label>Subscribe</label>
-            <div className="hint mb-2">
-              Comma-separated channels. <kbd>*</kbd> is a wildcard, e.g. <kbd>events:*</kbd>, or <kbd>*</kbd> for all.
-            </div>
-            <div className="row field-row">
+          <Section
+            title="Subscribe"
+            hint={
+              <>
+                Comma-separated channels. <code>*</code> is a wildcard, e.g. <code>events:*</code>, or <code>*</code> for all.
+              </>
+            }
+          >
+            <div className="row">
               <input
                 className="grow"
                 placeholder="channel1, channel2"
+                aria-label="Channels"
                 value={subChannels}
                 disabled={subscribed}
                 onChange={(e) => setSubChannels(e.target.value)}
               />
               <button
-                className={`btn-field ${subscribed ? 'btn-danger' : ''}`}
+                className={subscribed ? 'btn-secondary btn-on' : 'btn-primary'}
                 onClick={toggleSubscribe}
                 title={subscribed ? 'Stop listening on these channels' : 'Start listening on these channels'}
               >
-                {subscribed ? 'stop' : 'listen'}
+                {subscribed ? 'Stop' : 'Listen'}
               </button>
+              {subscribed && <span className="pill ok live">Listening</span>}
             </div>
-            {subscribed && <div className="hint">listening: {subChannels} — press stop to change</div>}
-            {feed.length > 0 && (
+            {feed.length > 0 ? (
               <>
-                <div className="feed-head inline">
+                <div className="feed-head">
                   <span className="count">{feed.length} messages</span>
-                  <button className="btn-field spacer" onClick={() => setFeed([])} title="Discard the messages received so far">
-                    clear feed
+                  <span className="spacer" />
+                  <button className="btn-ghost btn-sm" onClick={() => setFeed([])} title="Discard the messages received so far">
+                    Clear
                   </button>
                 </div>
                 <div className="feed">
-                  {feed.map((f) => {
-                    const pretty = tryJson(f.message);
-                    return (
-                      <div key={f.id} className="feed-item">
-                        <span className="feed-ch">{f.channel}</span>
-                        <span className="feed-time">{new Date(f.at).toLocaleTimeString()}</span>
-                        <div className="feed-msg">{pretty ?? f.message}</div>
-                      </div>
-                    );
-                  })}
+                  {feed.map((f) => (
+                    <FeedRow key={f.id} channel={f.channel} at={f.at} text={f.message} />
+                  ))}
                 </div>
               </>
+            ) : (
+              <Empty compact className="mt-3" title={subscribed ? 'Listening, nothing yet' : 'Not listening'} hint="Messages published to these channels will appear here, newest first." />
             )}
-          </div>
+          </Section>
         </div>
 
         <div hidden={rtab !== 'info'}>
@@ -660,12 +711,15 @@ function InfoTab({ url }: { url: string }) {
 
   return (
     <div>
-      <div className="inline mb-2">
-        <button className="btn-field" onClick={refresh} title="Read INFO from the connected instance">
-          refresh INFO
+      <div className="inline mb-3">
+        <button className="btn-secondary" onClick={refresh} title="Read INFO from the connected instance">
+          Load server stats
         </button>
-        <div className="hint">server stats for the connected instance</div>
+        <span className="hint m-0">Version, memory, clients and ops/sec from INFO.</span>
       </div>
+      {!sections && (
+        <Empty compact title="No server stats yet" hint="Press Load server stats to read them from the connected instance." />
+      )}
 
       {sections && (
         <>
@@ -679,7 +733,7 @@ function InfoTab({ url }: { url: string }) {
           </div>
           {Object.keys(keyspace).length > 0 && (
             <>
-              <label>Keyspace</label>
+              <div className="subhead">Keyspace</div>
               <table className="rtable">
                 <tbody>
                   {Object.entries(keyspace).map(([db, v]) => (
@@ -695,10 +749,8 @@ function InfoTab({ url }: { url: string }) {
         </>
       )}
 
-      <div className="section">
-        <label>Export keys</label>
-        <div className="hint mb-2">Downloads a JSON file of keys matching the pattern, up to 2000 keys.</div>
-        <div className="row field-row">
+      <Section title="Export keys" hint="Downloads a JSON file of keys matching the pattern, up to 2000 keys.">
+        <div className="row">
           <input
             className="grow"
             value={exportMatch}
@@ -707,26 +759,17 @@ function InfoTab({ url }: { url: string }) {
             onChange={(e) => setExportMatch(e.target.value)}
           />
           <button
-            className="btn-field"
+            className="btn-secondary"
             disabled={exporting}
             onClick={doExport}
             title="Download matching keys and values as JSON"
           >
-            {exporting ? 'exporting…' : 'export'}
+            {exporting ? 'Exporting…' : 'Export'}
           </button>
         </div>
-      </div>
+      </Section>
 
       {err && <div className="hint mt-2">{err}</div>}
-      {!sections && (
-        <div className="empty mt-3">
-          <div className="empty-icon">◇</div>
-          <div className="empty-title">No server stats yet</div>
-          <div className="empty-hint">
-            Press <kbd>refresh INFO</kbd> above to read version, memory and ops/sec from this instance.
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -783,23 +826,22 @@ function CommandsTab({
 
   return (
     <div>
-      <div className="hint mb-1">
-        Free-form batch. Set a target key (edit the root / drill down), insert command
-        templates, paste as many lines as you want, then <b>Run all</b>.
+      <div className="hint m-0 mb-2">
+        Run any Redis commands, one per line. Insert a template below, edit it, then press <b>Run all</b>.
       </div>
 
-      <label>Target key</label>
-      <div className="hint mb-1">
-        Fills <kbd>{'{k}'}</kbd> in the insert chips below; each command line can still name its own key.
-      </div>
+      <label className="field-first">Target key</label>
       <input
         value={key}
         spellCheck={false}
         placeholder="myprefix:sub:key"
         onChange={(e) => setKey(e.target.value)}
       />
+      <div className="hint">
+        Fills <code>{'{k}'}</code> in the templates. Opening a key on the left sets it.
+      </div>
 
-      <label>Insert command</label>
+      <label>Insert a template</label>
       {order.map((t) => (
         <div key={t} className="tpl-group">
           <span className="tpl-type">{t}</span>
@@ -807,8 +849,8 @@ function CommandsTab({
             <button
               type="button"
               key={tpl}
-              className="chip"
-              title={`${tpl.split(' ')[0]} — ${desc}\n\n${tpl.replaceAll('{k}', key || '<key>')}`}
+              className="chip chip-mono"
+              title={`${tpl.split(' ')[0]}: ${desc}\n\n${tpl.replaceAll('{k}', key || '<key>')}`}
               onClick={() => append(tpl)}
             >
               {tpl.split(' ')[0]}
@@ -818,66 +860,69 @@ function CommandsTab({
       ))}
 
       <label>Commands</label>
-      <div className="hint mb-1">
-        One per line · quotes respected · <kbd>#</kbd> starts a comment · <kbd>⌘/Ctrl + Enter</kbd> runs them all.
-      </div>
       <textarea
-        rows={12}
+        rows={10}
         value={script}
         spellCheck={false}
-        placeholder={`ZADD myset:key 1 '{"id":"a"}'\nZADD myset:key 2 '{"id":"b"}'\nSADD myset:key2 member1 member2`}
+        aria-label="Commands"
+        placeholder={`TTL user:1\nHGETALL user:1\nSADD tags a b`}
         onChange={(e) => setScript(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) runAll();
         }}
       />
+      <div className="hint">
+        Quotes are respected, <code>#</code> starts a comment, <kbd>⌘↵</kbd> runs them all.
+      </div>
       <div className="inline mt-2">
-        <button className="mini" disabled={busy} onClick={runAll} title="Run every command line in order">
-          {busy ? 'Running…' : 'Run all ▶'}
+        <button className="btn-primary" disabled={busy || !script.trim()} onClick={runAll} title="Run every command line in order">
+          {busy ? 'Running…' : 'Run all'}
         </button>
         <button
-          className="btn-field"
-          onClick={() => { setScript(''); setResults(null); }}
+          className="btn-ghost"
+          onClick={() => {
+            setScript('');
+            setResults(null);
+          }}
           title="Empty the command box and drop the results"
         >
-          clear script
+          Clear
         </button>
       </div>
 
       {results ? (
-        <div className="section">
-          <div className={`status ${okCount === results.length ? 'ok' : 'bad'}`}>
-            {okCount}/{results.length} ok
-          </div>
-          <div className="inline mb-2">
-            <span className="count">{results.length} replies</span>
-            <button
-              className="btn-field spacer"
-              onClick={() => setResults(null)}
-              title="Discard these replies"
-            >
-              clear results
+        <Section
+          title={
+            <>
+              Replies <span className="count">({okCount}/{results.length} ok)</span>
+            </>
+          }
+          actions={
+            <button className="btn-ghost btn-sm" onClick={() => setResults(null)} title="Discard these replies">
+              Clear
             </button>
+          }
+        >
+          <div className="history">
+            {results.map((r, i) => (
+              <div key={i} className={`hist-item ${r.ok ? 'hist-ok' : 'hist-bad'}`}>
+                <div className="cmd-preview">{r.argv.join(' ')}</div>
+                <pre className="cell-json mt-1">{r.ok ? JSON.stringify(r.reply) : `ERROR: ${r.error}`}</pre>
+              </div>
+            ))}
           </div>
-          {results.map((r, i) => (
-            <div key={i} className={`hist-item ${r.ok ? 'hist-ok' : 'hist-bad'}`}>
-              <div className="cmd-preview">{r.argv.join(' ')}</div>
-              <pre className="cell-json mt-1">
-                {r.ok ? JSON.stringify(r.reply) : `ERROR: ${r.error}`}
-              </pre>
-            </div>
-          ))}
-        </div>
+        </Section>
       ) : (
-        <div className="section">
-          <div className="empty">
-            <div className="empty-icon">◇</div>
-            <div className="empty-title">No commands run yet</div>
-            <div className="empty-hint">
-              Insert a template above or type a line like <kbd>TTL user:1</kbd>, then press Run all.
-            </div>
-          </div>
-        </div>
+        <Empty
+          compact
+          className="mt-4"
+          title="No commands run yet"
+          hint={
+            <>
+              Insert a template above or type a line like <code>TTL user:1</code>, then press Run all.
+            </>
+          }
+        />
       )}
     </div>
   );
@@ -887,6 +932,79 @@ function Cell({ value, fmtJsonOn }: { value: string; fmtJsonOn: boolean }) {
   const pretty = fmtJsonOn ? tryJson(value) : null;
   return pretty ? <pre className="cell-json">{pretty}</pre> : <>{value}</>;
 }
+
+const ValueRows = memo(function ValueRows({
+view,
+fmtJsonOn,
+onDelMember,
+}: {
+view: RedisKeyView;
+fmtJsonOn: boolean;
+onDelMember: (m: string) => void;
+}) {
+  if (view.type === 'string') {
+    const s = String(view.value ?? '');
+    const pretty = fmtJsonOn ? tryJson(s) : null;
+    return <pre>{pretty ?? s}</pre>;
+  }
+  if (view.type === 'hash' || view.type === 'zset') {
+    const pairs = view.value as [string, string][];
+    const isZ = view.type === 'zset';
+    return (
+      <table className="rtable">
+        <thead>
+          <tr>
+            <th>{isZ ? 'member' : 'field'}</th>
+            <th>{isZ ? 'score' : 'value'}</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {pairs.map(([a, b], i) => (
+            <tr key={i}>
+              <td><Cell value={isZ ? b : a} fmtJsonOn={fmtJsonOn} /></td>
+              <td><Cell value={isZ ? a : b} fmtJsonOn={fmtJsonOn} /></td>
+              <td>
+                <button
+                  type="button"
+                  className="del-x"
+                  aria-label={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
+                  title={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
+                  onClick={() => onDelMember(isZ ? b : a)}
+                >
+                  ✕
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+  const arr = view.value as string[];
+  return (
+    <table className="rtable">
+      <tbody>
+        {arr.map((v, i) => (
+          <tr key={i}>
+            <td><Cell value={v} fmtJsonOn={fmtJsonOn} /></td>
+            <td>
+              <button
+                type="button"
+                className="del-x"
+                aria-label={`Remove this element from ${view.key}`}
+                title={`Remove this element from ${view.key}`}
+                onClick={() => onDelMember(v)}
+              >
+                ✕
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+});
 
 function KeyDetail({
   view,
@@ -914,76 +1032,12 @@ function KeyDetail({
   // member is cheap and undone by adding it back, so only the key arms.
   const delArmed = useArmedConfirm();
   const color = TYPE_COLORS[view.type] ?? 'var(--text-dim)';
+  const delMember = useStableCallback(onDelMember);
 
   const copyValue = () =>
     navigator.clipboard.writeText(
       typeof view.value === 'string' ? view.value : JSON.stringify(view.value, null, 2),
     );
-
-  const rows = () => {
-    if (view.type === 'string') {
-      const s = String(view.value ?? '');
-      const pretty = fmtJsonOn ? tryJson(s) : null;
-      return <pre>{pretty ?? s}</pre>;
-    }
-    if (view.type === 'hash' || view.type === 'zset') {
-      const pairs = view.value as [string, string][];
-      const isZ = view.type === 'zset';
-      return (
-        <table className="rtable">
-          <thead>
-            <tr>
-              <th>{isZ ? 'member' : 'field'}</th>
-              <th>{isZ ? 'score' : 'value'}</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {pairs.map(([a, b], i) => (
-              <tr key={i}>
-                <td><Cell value={isZ ? b : a} fmtJsonOn={fmtJsonOn} /></td>
-                <td><Cell value={isZ ? a : b} fmtJsonOn={fmtJsonOn} /></td>
-                <td>
-                  <button
-                    type="button"
-                    className="del-x"
-                    aria-label={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
-                    title={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
-                    onClick={() => onDelMember(isZ ? b : a)}
-                  >
-                    ✕
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      );
-    }
-    const arr = view.value as string[];
-    return (
-      <table className="rtable">
-        <tbody>
-          {arr.map((v, i) => (
-            <tr key={i}>
-              <td><Cell value={v} fmtJsonOn={fmtJsonOn} /></td>
-              <td>
-                <button
-                  type="button"
-                  className="del-x"
-                  aria-label={`Remove this element from ${view.key}`}
-                  title={`Remove this element from ${view.key}`}
-                  onClick={() => onDelMember(v)}
-                >
-                  ✕
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    );
-  };
 
   const shown = Array.isArray(view.value) ? (view.value as unknown[]).length : 0;
   const count = Array.isArray(view.value)
@@ -994,46 +1048,61 @@ function KeyDetail({
 
   return (
     <div>
-      {/* the header carries the key's type colour, which is data-driven */}
-      <div className="status break" style={{ background: color + '22', color }}>
-        {view.type} · {view.key} · TTL{' '}
-        {view.ttl === -1 ? '∞' : view.ttl === -2 ? 'gone' : `${view.ttl}s`}
-        {count}
+      <div className="status break" style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color, borderColor: `color-mix(in srgb, ${color} 45%, transparent)` }}>
+        <span>{view.type}</span>
+        <span className="sep">·</span>
+        <span>{view.key}</span>
+        <span className="sep">·</span>
+        <span>TTL {view.ttl === -1 ? '∞' : view.ttl === -2 ? 'gone' : `${view.ttl}s`}</span>
+        {count && (
+          <>
+            <span className="sep">·</span>
+            <span>{count.replace(/^ · /, '')}</span>
+          </>
+        )}
       </div>
-      <div className="row field-row mb-2">
+      <div className="result-bar">
         <input
           className="w-md"
-          placeholder="ttl seconds (-1 persist)"
+          placeholder="TTL seconds, -1 = keep"
+          aria-label="New TTL in seconds"
           value={ttlInput}
           onChange={(e) => setTtlInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && ttlInput.trim() && onExpire(Number(ttlInput))}
         />
-        <button className="btn-field" onClick={() => onExpire(Number(ttlInput))} title="Set this key's TTL to the seconds entered">
-          expire
+        <button className="btn-secondary btn-sm" disabled={!ttlInput.trim()} onClick={() => onExpire(Number(ttlInput))} title="Set this key's TTL">
+          Set TTL
         </button>
-        <button className="btn-field" onClick={onRefresh} title="Re-read this key from the server">refresh</button>
-        <button className="btn-field" onClick={copyValue} title="Copy the whole value to the clipboard">copy</button>
+        <span className="spacer" />
         <button
-          className={`btn-field ${fmtJsonOn ? 'btn-on' : ''}`}
+          className={`btn-ghost btn-sm ${fmtJsonOn ? 'btn-on' : ''}`}
+          aria-pressed={fmtJsonOn}
           onClick={onToggleFmt}
           title="Pretty-print values that parse as JSON"
         >
-          {fmtJsonOn ? 'JSON: on' : 'JSON: off'}
+          Format JSON
+        </button>
+        <button className="btn-ghost btn-sm" onClick={onRefresh} title="Read this key again">
+          Refresh
+        </button>
+        <button className="btn-ghost btn-sm" onClick={copyValue} title="Copy the whole value">
+          Copy
         </button>
         <button
-          className="btn-field btn-danger"
+          className={`btn-secondary btn-sm btn-danger ${delArmed.showsArmed('key') ? 'btn-on' : ''}`}
           onClick={() => (delArmed.isArmed('key') ? onDelKey() : delArmed.arm('key'))}
           onMouseLeave={delArmed.disarm}
           onBlur={delArmed.disarm}
           title={`Delete the whole key ${view.key}`}
         >
-          {delArmed.showsArmed('key') ? 'Confirm DEL' : 'DEL key'}
+          {delArmed.showsArmed('key') ? 'Click again to delete' : 'Delete key'}
         </button>
       </div>
-      {rows()}
+      <ValueRows view={view} fmtJsonOn={fmtJsonOn} onDelMember={delMember} />
       {view.nextCursor && (
-        <div className="inline mt-2">
-          <button className="btn-field" onClick={onLoadMore} title="Append the next page of elements to this view">
-            load more (next ~500 of {view.total})
+        <div className="more-row">
+          <button className="btn-secondary btn-sm" onClick={onLoadMore} title="Append the next page of elements">
+            Load more (next ~500 of {view.total})
           </button>
         </div>
       )}
@@ -1047,46 +1116,46 @@ function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, un
   const [b, setB] = useState('');
   if (type === 'string')
     return (
-      <div className="row field-row addrow">
+      <div className="row addrow">
         <input className="grow" placeholder="new value" value={a} onChange={(e) => setA(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ value: a })} title="Overwrite the string value">set</button>
+        <button className="btn-secondary" onClick={() => onAdd({ value: a })} title="Overwrite the string value">set</button>
       </div>
     );
   if (type === 'hash')
     return (
-      <div className="row field-row addrow">
+      <div className="row addrow">
         <input className="w-md" placeholder="field" value={a} onChange={(e) => setA(e.target.value)} />
         <input className="grow" placeholder="value" value={b} onChange={(e) => setB(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ field: a, value: b })} title="Set this field on the hash">
+        <button className="btn-secondary" onClick={() => onAdd({ field: a, value: b })} title="Set this field on the hash">
           hset
         </button>
       </div>
     );
   if (type === 'zset')
     return (
-      <div className="row field-row addrow">
+      <div className="row addrow">
         <input className="w-sm" placeholder="score" value={a} onChange={(e) => setA(e.target.value)} />
         <input className="grow" placeholder="member" value={b} onChange={(e) => setB(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ score: a, member: b })} title="Add this member with the given score">
+        <button className="btn-secondary" onClick={() => onAdd({ score: a, member: b })} title="Add this member with the given score">
           zadd
         </button>
       </div>
     );
   if (type === 'set')
     return (
-      <div className="row field-row addrow">
+      <div className="row addrow">
         <input className="grow" placeholder="member" value={a} onChange={(e) => setA(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ member: a })} title="Add this member to the set">sadd</button>
+        <button className="btn-secondary" onClick={() => onAdd({ member: a })} title="Add this member to the set">sadd</button>
       </div>
     );
   if (type === 'list')
     return (
-      <div className="row field-row addrow">
+      <div className="row addrow">
         <input className="grow" placeholder="value" value={a} onChange={(e) => setA(e.target.value)} />
-        <button className="btn-field" onClick={() => onAdd({ value: a, left: false })} title="Append to the tail of the list">
+        <button className="btn-secondary" onClick={() => onAdd({ value: a, left: false })} title="Append to the tail of the list">
           rpush
         </button>
-        <button className="btn-field" onClick={() => onAdd({ value: a, left: true })} title="Prepend to the head of the list">
+        <button className="btn-secondary" onClick={() => onAdd({ value: a, left: true })} title="Prepend to the head of the list">
           lpush
         </button>
       </div>

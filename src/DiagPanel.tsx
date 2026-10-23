@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Empty, PanelHead } from './ui';
 
 const LS = 'conduit.diag.v1';
 
@@ -96,15 +97,6 @@ function ExpiryVerdict({ days }: { days: number }) {
   return <div className="status ok">PASS — valid for another {days} days</div>;
 }
 
-function Empty({ icon, title, hint }: { icon: string; title: string; hint: string }) {
-  return (
-    <div className="empty mt-3">
-      <div className="empty-icon">{icon}</div>
-      <div className="empty-title">{title}</div>
-      <div className="empty-hint">{hint}</div>
-    </div>
-  );
-}
 
 interface Persisted {
   tcpHost: string;
@@ -170,17 +162,13 @@ export default function DiagPanel() {
 
   const title = (id: Tool) => {
     const n = NAV.find((x) => x.id === id)!;
-    return (
-      <div className="util-title">
-        {n.label}
-        <div className="hint">{n.desc}</div>
-      </div>
-    );
+    return <PanelHead title={n.label} tagline={n.desc} />;
   };
 
   return (
     <div className="navlay">
       <div className="navlist">
+        <div className="navlist-label">Network checks</div>
         {NAV.map((n) => (
           <button
             type="button"
@@ -195,13 +183,14 @@ export default function DiagPanel() {
       </div>
 
       <div className="navcontent">
+        <div className="navcontent-inner">
         {sel === 'tcp' && (
           <>
             {title('tcp')}
-            <div className="row field-row">
-              <input className="grow" value={f.tcpHost} spellCheck={false} placeholder="host (e.g. db.internal)" onChange={(e) => set('tcpHost', e.target.value)} />
-              <input className="w-xs" value={f.tcpPort} placeholder="port" onChange={(e) => set('tcpPort', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runTcp()} />
-              <button className="btn-field" disabled={!f.tcpHost.trim() || !f.tcpPort.trim()} onClick={runTcp}>check</button>
+            <div className="row">
+              <input className="grow" aria-label="Host" value={f.tcpHost} spellCheck={false} placeholder="host, e.g. example.com" onChange={(e) => set('tcpHost', e.target.value)} />
+              <input className="w-xs" aria-label="Port" value={f.tcpPort} placeholder="443" onChange={(e) => set('tcpPort', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runTcp()} />
+              <button className="btn-primary" disabled={!f.tcpHost.trim() || !f.tcpPort.trim()} onClick={runTcp}>Check</button>
             </div>
             {tcp ? (
               <div className="mt-3">
@@ -221,7 +210,7 @@ export default function DiagPanel() {
               <Empty
                 icon="⇢"
                 title="Not run yet"
-                hint="Enter a host and port, then press check. The result says whether a TCP connection completed, and how long it took."
+                hint="Enter a host and port, e.g. example.com and 443, then press Check. You get whether a TCP connection opened, and how long it took."
               />
             )}
           </>
@@ -230,10 +219,10 @@ export default function DiagPanel() {
         {sel === 'tls' && (
           <>
             {title('tls')}
-            <div className="row field-row">
-              <input className="grow" value={f.tlsHost} spellCheck={false} placeholder="host (e.g. api.example.com)" onChange={(e) => set('tlsHost', e.target.value)} />
-              <input className="w-xs" value={f.tlsPort} placeholder="443" onChange={(e) => set('tlsPort', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runTls()} />
-              <button className="btn-field" onClick={runTls}>check</button>
+            <div className="row">
+              <input className="grow" aria-label="Host" value={f.tlsHost} spellCheck={false} placeholder="host, e.g. example.com" onChange={(e) => set('tlsHost', e.target.value)} />
+              <input className="w-xs" aria-label="Port" value={f.tlsPort} placeholder="443" onChange={(e) => set('tlsPort', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runTls()} />
+              <button className="btn-primary" disabled={!f.tlsHost.trim()} onClick={runTls}>Check</button>
             </div>
             {tls ? (
               tls.ok ? (
@@ -250,7 +239,7 @@ export default function DiagPanel() {
                     </>
                   )}
                   {tls.daysLeft != null && <ExpiryVerdict days={tls.daysLeft} />}
-                  <table className="rtable">
+                  <table className="rtable kv-table mt-3">
                     <tbody>
                       <tr><td>subject</td><td>{tls.subject || '-'}</td></tr>
                       <tr><td>issuer</td><td>{tls.issuer || '-'}</td></tr>
@@ -270,7 +259,7 @@ export default function DiagPanel() {
               <Empty
                 icon="⚿"
                 title="Not run yet"
-                hint="Enter a host and a TLS port, then press check. The result shows who issued the certificate, when it expires and whether the chain is trusted."
+                hint="Enter a host and TLS port, e.g. example.com and 443, then press Check. You get the issuer, the expiry date and whether the chain is trusted."
               />
             )}
           </>
@@ -279,15 +268,15 @@ export default function DiagPanel() {
         {sel === 'dns' && (
           <>
             {title('dns')}
-            <div className="row field-row">
-              <input className="grow" value={f.dnsHost} spellCheck={false} placeholder="hostname" onChange={(e) => set('dnsHost', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runDns()} />
-              <button className="btn-field" onClick={runDns}>resolve</button>
+            <div className="row">
+              <input className="grow" aria-label="Hostname" value={f.dnsHost} spellCheck={false} placeholder="hostname, e.g. example.com" onChange={(e) => set('dnsHost', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runDns()} />
+              <button className="btn-primary" disabled={!f.dnsHost.trim()} onClick={runDns}>Resolve</button>
             </div>
             {dns ? (
               dns.ok ? (
                 <div className="mt-3">
                   <div className="status ok">PASS — name resolved</div>
-                  <table className="rtable">
+                  <table className="rtable kv-table mt-3">
                     <tbody>
                       <tr><td>A</td><td>{(dns.A ?? []).join(', ') || '-'}</td></tr>
                       <tr><td>AAAA</td><td>{(dns.AAAA ?? []).join(', ') || '-'}</td></tr>
@@ -306,7 +295,7 @@ export default function DiagPanel() {
               <Empty
                 icon="⌕"
                 title="Not run yet"
-                hint="Enter a hostname such as api.example.com, then press resolve to see its A, AAAA, CNAME and MX records."
+                hint="Enter a hostname such as example.com, then press Resolve to see its A, AAAA, CNAME and MX records."
               />
             )}
           </>
@@ -319,9 +308,9 @@ export default function DiagPanel() {
             <textarea rows={4} value={f.urls} spellCheck={false} placeholder={'https://api.example.com/health\nhttps://other.internal/healthz'} onChange={(e) => set('urls', e.target.value)} />
             <div className="hint">One per line. Lines without an http:// or https:// scheme are ignored.</div>
             <div className="inline mt-3">
-              <button className="mini" onClick={runHealth}>check now</button>
-              <button className={`btn-field ${auto ? 'btn-on' : ''}`} aria-pressed={auto} onClick={() => setAuto(!auto)}>
-                auto 10s
+              <button className="btn-primary" disabled={urlList().length === 0} onClick={runHealth}>Check now</button>
+              <button className={`btn-secondary ${auto ? 'btn-on' : ''}`} aria-pressed={auto} onClick={() => setAuto(!auto)}>
+                {auto ? 'Polling every 10s' : 'Poll every 10s'}
               </button>
             </div>
             {urlList().length > 0 && Object.keys(health).length > 0 ? (
@@ -337,7 +326,7 @@ export default function DiagPanel() {
                           {!r ? (
                             <span className="badge">not run</span>
                           ) : (
-                            <span className={passed ? 'ok' : 'bad'}>{passed ? `PASS ${r.status ?? ''}` : `FAIL ${r.status ?? r.error ?? ''}`}</span>
+                            <span className={`pill ${passed ? 'ok' : 'bad'}`}>{passed ? `PASS ${r.status ?? ''}` : `FAIL ${r.status ?? r.error ?? ''}`}</span>
                           )}
                         </td>
                         <td className="nowrap">{r?.ms != null ? `${r.ms}ms` : ''}</td>
@@ -360,13 +349,14 @@ export default function DiagPanel() {
                 title={urlList().length > 0 ? 'Not run yet' : 'No URLs to poll'}
                 hint={
                   urlList().length > 0
-                    ? 'Press check now for a single pass, or auto 10s to keep polling. Each row will show a status code and a response time.'
-                    : 'Add one full URL per line above, then press check now to see which endpoints answer.'
+                    ? 'Press Check now for one pass, or Poll every 10s to keep watching. Each row shows a status code and a response time.'
+                    : 'Add one full URL per line above, e.g. https://example.com, then press Check now.'
                 }
               />
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );

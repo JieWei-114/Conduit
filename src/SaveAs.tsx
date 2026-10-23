@@ -11,8 +11,8 @@ import { useEffect, useRef, useState } from 'react';
  * after typing a name is worse than being told instead of being asked.
  */
 export function SaveAs({
-  label = 'save',
-  placeholder = 'name to save as',
+  label = 'Save',
+  placeholder = 'Name to save as',
   suggested = '',
   canSave,
   onSave,
@@ -24,8 +24,11 @@ export function SaveAs({
   suggested?: string;
   /** Return a reason saving is not possible yet, or null when it is. */
   canSave?: () => string | null;
-  /** Commit the name. Return a confirmation to show, or void. */
-  onSave: (name: string) => string | void;
+  /**
+   * Commit the name. Return a confirmation to show, or void. Return `{ keepOpen }` to show a
+   * message and leave the name field open, e.g. when the name is taken.
+   */
+  onSave: (name: string) => string | void | { keepOpen: string };
   /** Where to report the reason, the confirmation, and a missing name. */
   onMessage?: (message: string) => void;
 }) {
@@ -48,6 +51,7 @@ export function SaveAs({
     const trimmed = name.trim();
     if (!trimmed) return onMessage?.('Type a name to save it under');
     const confirmation = onSave(trimmed);
+    if (typeof confirmation === 'object') return onMessage?.(confirmation.keepOpen);
     setNaming(false);
     setName('');
     if (confirmation) onMessage?.(confirmation);
@@ -60,7 +64,7 @@ export function SaveAs({
 
   if (!naming) {
     return (
-      <button className="btn-field" onClick={begin} title="Save these settings under a name">
+      <button className="btn-secondary" onClick={begin} title="Save these settings under a name">
         {label}
       </button>
     );
@@ -70,7 +74,7 @@ export function SaveAs({
     <>
       <input
         ref={field}
-        className="max-md"
+        className="save-name"
         placeholder={placeholder}
         value={name}
         spellCheck={false}
@@ -80,11 +84,11 @@ export function SaveAs({
           if (e.key === 'Escape') cancel();
         }}
       />
-      <button className="btn-field" onClick={commit} title="Save under this name">
+      <button className="btn-primary" onClick={commit} title="Save under this name">
         {label}
       </button>
       <button className="btn-ghost" onClick={cancel} title="Cancel (Esc)">
-        cancel
+        Cancel
       </button>
     </>
   );

@@ -1,4 +1,7 @@
 import { useState } from 'react';
+import { Empty, PanelHead } from './ui';
+import { useExample } from './examples';
+import RecipeEditor from './RecipeEditor';
 
 // ── tiny helpers ────────────────────────────────────────────────────────────
 const b64utf8 = (s: string) => btoa(unescape(encodeURIComponent(s)));
@@ -75,24 +78,15 @@ function CopyOut({ value }: { value: string }) {
     <div className="util-out">
       <pre>{value}</pre>
       <button type="button" className="chip" onClick={copy}>
-        copy
+        Copy
       </button>
     </div>
   );
 }
 
-function Empty({ icon, title, hint }: { icon: string; title: string; hint: string }) {
-  return (
-    <div className="empty mt-3">
-      <div className="empty-icon">{icon}</div>
-      <div className="empty-title">{title}</div>
-      <div className="empty-hint">{hint}</div>
-    </div>
-  );
-}
-
-type Tool = 'base64' | 'hex' | 'url' | 'json' | 'time' | 'cron' | 'uuid';
+type Tool = 'recipe' | 'base64' | 'hex' | 'url' | 'json' | 'time' | 'cron' | 'uuid';
 const NAV: { id: Tool; label: string; desc: string }[] = [
+  { id: 'recipe', label: 'Recipe', desc: 'Chain steps such as encode, hash, sign or encrypt. Each step takes the previous output, and runs as you edit.' },
   { id: 'base64', label: 'Base64', desc: 'Encode text to Base64 and decode Base64 back to text, UTF-8 safe.' },
   { id: 'hex', label: 'Hex', desc: 'Convert text to space-separated hex bytes and back.' },
   { id: 'url', label: 'URL encode', desc: 'Percent-encode or decode a query string value or path segment.' },
@@ -103,7 +97,12 @@ const NAV: { id: Tool; label: string; desc: string }[] = [
 ];
 
 export default function UtilsPanel() {
-  const [sel, setSel] = useState<Tool>('base64');
+  const [sel, setSel] = useState<Tool>('recipe');
+  const [starter, setStarter] = useState<{ id: string; n: number } | null>(null);
+  useExample<{ template: string }>('utils', (d) => {
+    setSel('recipe');
+    setStarter((s) => ({ id: d.template, n: (s?.n ?? 0) + 1 }));
+  });
   const [b64in, setB64in] = useState('');
   const [hexin, setHexin] = useState('');
   const [urlin, setUrlin] = useState('');
@@ -129,17 +128,13 @@ export default function UtilsPanel() {
 
   const title = (id: Tool) => {
     const n = NAV.find((x) => x.id === id)!;
-    return (
-      <div className="util-title">
-        {n.label}
-        <div className="hint">{n.desc}</div>
-      </div>
-    );
+    return <PanelHead title={n.label} tagline={n.desc} />;
   };
 
   return (
     <div className="navlay">
       <div className="navlist">
+        <div className="navlist-label">Tools</div>
         {NAV.map((n) => (
           <button
             type="button"
@@ -154,6 +149,14 @@ export default function UtilsPanel() {
       </div>
 
       <div className="navcontent">
+        <div className="navcontent-inner">
+        {sel === 'recipe' && (
+          <>
+            {title('recipe')}
+            <RecipeEditor starter={starter} />
+          </>
+        )}
+
         {sel === 'base64' && (
           <>
             {title('base64')}
@@ -232,15 +235,15 @@ export default function UtilsPanel() {
             <input value={ts} spellCheck={false} placeholder="1700000000  ·  or  2026-08-17T10:00:00Z" onChange={(e) => setTs(e.target.value)} />
             <div className="hint">Ten digits are read as seconds, thirteen as milliseconds.</div>
             <div className="inline mt-2">
-              <button className="btn-field" onClick={() => setTs(String(Math.floor(browserNow() / 1000)))}>now (s)</button>
-              <button className="btn-field" onClick={() => setTs(String(browserNow()))}>now (ms)</button>
+              <button className="btn-secondary btn-sm" onClick={() => setTs(String(Math.floor(browserNow() / 1000)))}>Now (s)</button>
+              <button className="btn-secondary btn-sm" onClick={() => setTs(String(browserNow()))}>Now (ms)</button>
             </div>
             {tsOut ? (
               <div className="mt-3">
                 <CopyOut value={tsOut} />
               </div>
             ) : (
-              <Empty icon="⏱" title="No time to show" hint="Enter a Unix timestamp or an ISO date, or press now (s) to start from the current time." />
+              <Empty icon="⏱" title="No time to show" hint="Enter a Unix timestamp such as 1700000000 or an ISO date, or press Now to start from the current time." />
             )}
           </>
         )}
@@ -266,9 +269,9 @@ export default function UtilsPanel() {
             {title('uuid')}
             <div className="hint mb-2">Uses <code className="mono">Math.random</code>, so these are fine for fixtures but not for anything security-related.</div>
             <div className="inline">
-              <button className="mini" onClick={() => setUuids((u) => [uuidv4(), ...u].slice(0, 20))}>generate</button>
+              <button className="btn-primary" onClick={() => setUuids((u) => [uuidv4(), ...u].slice(0, 20))}>Generate</button>
               {uuids.length > 0 && (
-                <button className="btn-field btn-danger" onClick={() => setUuids([])}>clear</button>
+                <button className="btn-ghost btn-danger" onClick={() => setUuids([])}>Clear</button>
               )}
             </div>
             {uuids.length > 0 ? (
@@ -276,10 +279,11 @@ export default function UtilsPanel() {
                 <CopyOut value={uuids.join('\n')} />
               </div>
             ) : (
-              <Empty icon="⌗" title="No UUIDs yet" hint="Press generate for a fresh v4 UUID. The last 20 are kept so you can copy them as a block." />
+              <Empty icon="⌗" title="No UUIDs yet" hint="Press Generate for a fresh v4 UUID. The last 20 are kept so you can copy them as a block." />
             )}
           </>
         )}
+        </div>
       </div>
     </div>
   );

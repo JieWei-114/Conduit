@@ -1,9 +1,23 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useMemo, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
 import JsonTree from './JsonTree';
 import { rowKeyDown, rowTabIndex } from './rowNav';
+import { RequestVarsBox } from './RequestVarsBox';
+import { withoutSecretValues } from './VarList';
+import { Empty, PanelHead, ReqTabs, Section, usePersist } from './ui';
+import { EXAMPLES, useExample } from './examples';
+import {
+  activeEnv,
+  extractInto,
+  maskSecrets,
+  NO_REQUEST_VARS,
+  resolve,
+  usesVars,
+  useEnvs,
+  type RequestVars,
+} from './vars';
 
 const LS_FORM = 'conduit.http.form.v2';
 const LS_TABS = 'conduit.http.tabs.v1';
@@ -36,6 +50,8 @@ interface HttpForm {
   form: KV[];
   files: FileItem[];
   timeoutMs: string;
+  /** `{{name}}` variables, computed values and response extraction for this request. */
+  vars: RequestVars;
 }
 
 interface HttpResult {
@@ -73,6 +89,7 @@ const DEFAULTS: HttpForm = {
   form: [],
   files: [],
   timeoutMs: '15000',
+  vars: NO_REQUEST_VARS,
 };
 
 function tryParse(s: unknown): unknown | undefined {
@@ -103,7 +120,84 @@ function hydrate(saved: Partial<HttpForm>): HttpForm {
     query: saved.query ?? [],
     form: saved.form ?? [],
     files: saved.files ?? [],
+    vars: { ...NO_REQUEST_VARS, ...(saved.vars ?? {}) },
   };
+}
+
+/** `form` as kept without the user saving it: no auth, no secret variable values. */
+function unsaved(form: HttpForm): HttpForm {
+  return { ...form, auth: AUTH_DEFAULTS, vars: { ...form.vars, vars: withoutSecretValues(form.vars.vars) } };
+}
+
+/** Whether `f` sends a body at all. */
+function sendsBody(f: HttpForm): boolean {
+  return f.bodyKind !== 'none' && f.method !== 'GET' && f.method !== 'HEAD';
+}
+
+/**
+ * The text fields `f` will actually send that may hold `{{name}}` references, keyed by how
+ * an error should name them. Fields a send leaves out (another auth type's, a body on GET)
+ * are not filled, so a stale reference there cannot block the request.
+ */
+function templatesOf(f: HttpForm): Record<string, string> {
+  const t: Record<string, string> = { URL: f.url, headers: f.headers };
+  if (f.auth.type === 'bearer' || f.auth.type === 'oauth2') t['auth token'] = f.auth.bearer;
+  if (f.auth.type === 'basic') {
+    t['auth user'] = f.auth.basicUser;
+    t['auth password'] = f.auth.basicPass;
+  }
+  if (f.auth.type === 'raw') t['auth value'] = f.auth.raw;
+  f.query.forEach((q, i) => {
+    t[`query param ${i + 1} name`] = q.key;
+    t[`query param ${i + 1} value`] = q.value;
+  });
+  if (sendsBody(f) && (f.bodyKind === 'json' || f.bodyKind === 'raw')) t.body = f.body;
+  if (sendsBody(f) && (f.bodyKind === 'form' || f.bodyKind === 'multipart'))
+    f.form.forEach((q, i) => {
+      t[`form field ${i + 1} name`] = q.key;
+      t[`form field ${i + 1} value`] = q.value;
+    });
+  return t;
+}
+
+/** `f` with the fields `templatesOf(f)` named replaced by their filled values in `r`. */
+function applyRendered(f: HttpForm, r: Record<string, string>): HttpForm {
+  const v = (key: string, fallback: string) => r[key] ?? fallback;
+  return {
+    ...f,
+    url: v('URL', f.url),
+    headers: v('headers', f.headers),
+    body: v('body', f.body),
+    auth: {
+      ...f.auth,
+      bearer: v('auth token', f.auth.bearer),
+      basicUser: v('auth user', f.auth.basicUser),
+      basicPass: v('auth password', f.auth.basicPass),
+      raw: v('auth value', f.auth.raw),
+    },
+    query: f.query.map((q, i) => ({ key: v(`query param ${i + 1} name`, q.key), value: v(`query param ${i + 1} value`, q.value) })),
+    form: f.form.map((q, i) => ({ key: v(`form field ${i + 1} name`, q.key), value: v(`form field ${i + 1} value`, q.value) })),
+  };
+}
+
+/** Request headers of `f`: the extra header lines, then its Authorization. */
+function headersOf(f: HttpForm): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of f.headers.split('\n')) {
+    const i = line.indexOf(':');
+    if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  const a = authHeader(f.auth);
+  if (a) out['authorization'] = a;
+  return out;
+}
+
+/** The URL of `f` with its query parameters appended. */
+function urlOf(f: HttpForm): string {
+  const active = f.query.filter((q) => q.key);
+  if (!active.length) return f.url;
+  const qs = active.map((q) => `${encodeURIComponent(q.key)}=${encodeURIComponent(q.value)}`).join('&');
+  return f.url + (f.url.includes('?') ? '&' : '?') + qs;
 }
 
 // ── Chrome-style request tabs: each tab is an independent request; history +
@@ -183,7 +277,6 @@ function parseCurl(text: string): Partial<HttpForm> | { error: string } | null {
   return out;
 }
 
-// ── KV table editor (module-level so it isn't remounted every render) ────────
 function KvTable({
   rows,
   onChange,
@@ -193,7 +286,7 @@ function KvTable({
   onChange: (r: KV[]) => void;
   ph: [string, string];
 }) {
-  const display = [...rows, { key: '', value: '' }]; // trailing blank row to add
+  const display = [...rows, { key: '', value: '' }];
   const edit = (i: number, patch: Partial<KV>) => {
     const next = display.map((r, j) => (j === i ? { ...r, ...patch } : r));
     onChange(next.filter((r) => r.key || r.value));
@@ -201,13 +294,85 @@ function KvTable({
   return (
     <div className="kv">
       {display.map((r, i) => (
-        <div key={i} className="row field-row mb-1">
-          <input placeholder={ph[0]} value={r.key} spellCheck={false} onChange={(e) => edit(i, { key: e.target.value })} />
-          <input className="grow" placeholder={ph[1]} value={r.value} spellCheck={false} onChange={(e) => edit(i, { value: e.target.value })} />
+        <div key={i} className="kv-row">
+          <input
+            placeholder={ph[0]}
+            value={r.key}
+            spellCheck={false}
+            aria-label={`${ph[0]} ${i + 1}`}
+            onChange={(e) => edit(i, { key: e.target.value })}
+          />
+          <input
+            placeholder={ph[1]}
+            value={r.value}
+            spellCheck={false}
+            aria-label={`${ph[1]} ${i + 1}`}
+            onChange={(e) => edit(i, { value: e.target.value })}
+          />
+          {i < rows.length ? (
+            <button
+              type="button"
+              className="btn-ghost btn-icon btn-danger"
+              aria-label={`Remove ${r.key || 'row'}`}
+              title="Remove"
+              onClick={() => onChange(rows.filter((_, j) => j !== i))}
+            >
+              ✕
+            </button>
+          ) : (
+            <span />
+          )}
         </div>
       ))}
     </div>
   );
+}
+
+const ResponseBody = memo(function ResponseBody({
+  result,
+  parsed,
+  view,
+}: {
+  result: HttpResult;
+  parsed: unknown;
+  view: string;
+}) {
+  if (!result.ok) return <pre>{result.error}</pre>;
+  if (result.binary)
+    return (
+      <div>
+        <div className="hint mb-2">
+          Binary response ({result.contentType || 'unknown type'}, {result.size} B), not shown as text.
+        </div>
+        <button
+          className="btn-secondary"
+          title="Save the binary response to a file"
+          onClick={() => {
+            const bin = atob(result.bodyBase64 ?? '');
+            const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+            const url = URL.createObjectURL(new Blob([bytes], { type: result.contentType || 'application/octet-stream' }));
+            const a = document.createElement('a');
+            a.href = url;
+            a.download =
+              'response' +
+              (result.contentType?.includes('image/png') ? '.png' : result.contentType?.includes('pdf') ? '.pdf' : '.bin');
+            a.click();
+            URL.revokeObjectURL(url);
+          }}
+        >
+          Download
+        </button>
+      </div>
+    );
+  if (parsed !== undefined && view === 'tree') return <JsonTree data={parsed} />;
+  if (parsed !== undefined && view === 'pretty') return <pre>{JSON.stringify(parsed, null, 2)}</pre>;
+  return <pre>{result.bodyText || '(empty body)'}</pre>;
+});
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
 }
 
 export default function HttpPanel() {
@@ -237,13 +402,10 @@ export default function HttpPanel() {
 
   const set = <K extends keyof HttpForm>(k: K, v: HttpForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
-  useEffect(() => {
-    // persist tabs but drop (a) file blobs — base64 would blow the quota, and
-    // (b) auth secrets — tokens/passwords shouldn't sit on disk. Re-enter after
-    // reload, or use a saved request (explicit) to keep auth.
-    const slim = tabs.map((t) => ({ id: t.id, form: { ...t.form, files: [], auth: AUTH_DEFAULTS } }));
-    localStorage.setItem(LS_TABS, JSON.stringify({ tabs: slim, activeId }));
-  }, [tabs, activeId]);
+  const persisted = useMemo(() => ({ tabs, activeId }), [tabs, activeId]);
+  usePersist(LS_TABS, persisted, () =>
+    JSON.stringify({ tabs: tabs.map((t) => ({ id: t.id, form: { ...unsaved(t.form), files: [] } })), activeId }),
+  );
 
   // ── tab operations ──────────────────────────────────────────────────────────
   const tabLabel = (t: HttpTab) => {
@@ -265,34 +427,35 @@ export default function HttpPanel() {
     if (id === activeId) setActiveId(next[Math.max(0, idx - 1)].id);
   };
 
-  const parseHeaders = () => {
-    const out: Record<string, string> = {};
-    for (const line of form.headers.split('\n')) {
-      const i = line.indexOf(':');
-      if (i > 0) out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-    }
-    const a = authHeader(form.auth);
-    if (a) out['authorization'] = a;
-    return out;
-  };
-
-  const fullUrl = useMemo(() => {
-    const active = form.query.filter((q) => q.key);
-    if (!active.length) return form.url;
-    const qs = active.map((q) => `${encodeURIComponent(q.key)}=${encodeURIComponent(q.value)}`).join('&');
-    return form.url + (form.url.includes('?') ? '&' : '?') + qs;
-  }, [form.url, form.query]);
+  const parseHeaders = () => headersOf(form);
+  const fullUrl = useMemo(() => urlOf(form), [form]);
+  const envs = useEnvs();
 
   const send = async () => {
     if (!form.url.trim() || busyMap[active.id]) return; // no-op while a send is in flight
     const tid = active.id; // pin the originating tab — user may switch mid-flight
     const sentForm = form; // snapshot: history must record what was actually sent
+    const sentEnv = envs.active; // extracted values go back to the environment that was used
     setBusyMap((m) => ({ ...m, [tid]: true }));
-    setResultsMap((m) => ({ ...m, [tid]: null }));
     setTab('response');
-    const kindForServer = form.bodyKind === 'json' ? 'raw' : form.bodyKind;
-    const headers = parseHeaders();
-    if (form.bodyKind === 'json' && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-type'))
+    // fill {{variables}} first; a request that cannot be filled is not sent
+    let out = sentForm;
+    let secrets: string[] = [];
+    const templates = templatesOf(sentForm);
+    if (usesVars(Object.values(templates), sentForm.vars)) {
+      try {
+        const resolved = await resolve(templates, sentForm.vars, activeEnv(envs));
+        out = applyRendered(sentForm, resolved.rendered);
+        secrets = resolved.secrets;
+      } catch (e: any) {
+        setResultsMap((m) => ({ ...m, [tid]: { ok: false, error: `variables: ${e?.message ?? e}` } }));
+        setBusyMap((m) => ({ ...m, [tid]: false }));
+        return;
+      }
+    }
+    const kindForServer = out.bodyKind === 'json' ? 'raw' : out.bodyKind;
+    const headers = headersOf(out);
+    if (out.bodyKind === 'json' && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-type'))
       headers['content-type'] = 'application/json';
     let res: HttpResult;
     try {
@@ -300,28 +463,39 @@ export default function HttpPanel() {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          url: fullUrl,
-          method: form.method,
+          url: urlOf(out),
+          method: out.method,
           headers,
           bodyKind: kindForServer,
-          body: form.body,
-          form: form.form.filter((f) => f.key),
-          files: form.files.filter((f) => f.field && f.name),
-          timeoutMs: Number(form.timeoutMs) || 15000,
+          body: out.body,
+          form: out.form.filter((f) => f.key),
+          files: out.files.filter((f) => f.field && f.name),
+          timeoutMs: Number(out.timeoutMs) || 15000,
         }),
       }).then((r) => r.json());
     } catch (e) {
       res = { ok: false, error: String(e) };
     }
     setResultsMap((m) => ({ ...m, [tid]: res }));
-    const text = res.ok ? (res.bodyText ?? '') : (res.error ?? '');
+    if (res.ok && sentForm.vars.extract.some((x) => x.name.trim() && x.path.trim())) {
+      // only a successful answer is read: an error body must not overwrite a good value
+      if ((res.status ?? 0) < 200 || (res.status ?? 0) >= 300)
+        flash(`Nothing extracted: the response was HTTP ${res.status}`);
+      else
+        extractInto(sentForm.vars.extract, { body: res.bodyText ?? '', headers: res.headers ?? {}, jsonBody: true }, sentEnv).then(
+          ({ env, names }) => names.length && flash(`Saved ${names.join(', ')} to environment "${env}"`),
+          (e) => flash(String(e?.message ?? e)),
+        );
+    }
+    // a server may echo what it was sent: the kept snapshot never carries a secret value
+    const text = maskSecrets(res.ok ? (res.bodyText ?? '') : (res.error ?? ''), secrets);
     setHist((h) => {
       const next: HttpHist[] = [
         {
           at: new Date().toISOString(),
-          // strip credentials — history is an implicit record of every request;
-          // don't persist tokens/passwords to disk (saved requests keep auth, opt-in).
-          form: { ...sentForm, auth: AUTH_DEFAULTS },
+          // strip credentials and secret values — history is an implicit record of every
+          // request; saved requests keep them, opt-in. {{templates}} are kept as written.
+          form: unsaved(sentForm),
           ok: res.ok && (res.status ?? 0) < 400,
           status: res.status,
           durationMs: res.durationMs,
@@ -372,7 +546,12 @@ export default function HttpPanel() {
         form.form.filter((f) => f.key).forEach((f) => lines.push(`  -F '${f.key}=${f.value}'`));
       else if (form.body) lines.push(`  --data-raw '${form.body.replace(/'/g, "'\\''")}'`);
     }
-    navigator.clipboard.writeText(lines.join(' \\\n'));
+    navigator.clipboard.writeText(lines.join(' \\\n')).then(
+      () => flash(form.vars && usesVars(Object.values(templatesOf(form)), form.vars)
+        ? 'Copied as cURL — {{variables}} are left as written'
+        : 'Copied as cURL'),
+      () => flash('Copy failed — the clipboard is not available'),
+    );
   };
 
   const restore = (h: HttpHist) => {
@@ -399,423 +578,485 @@ export default function HttpPanel() {
   const respViews = parsedResp !== undefined ? (['tree', 'pretty', 'raw'] as const) : (['raw'] as const);
   const respViewEff = (respViews as readonly string[]).includes(respView) ? respView : 'raw';
 
+  const loadExample = (ex: typeof EXAMPLES.http) => {
+    const blank = !form.url.trim();
+    const next = hydrate({ method: ex.method, url: ex.url, query: ex.query });
+    if (blank) setForm(next);
+    else {
+      const id = Math.max(0, ...tabs.map((t) => t.id)) + 1;
+      setTabs((ts) => [...ts, { id, form: next }]);
+      setActiveId(id);
+    }
+    setTab('response');
+  };
+  useExample<typeof EXAMPLES.http>('http', loadExample);
+
+  const activeQuery = form.query.filter((q) => q.key).length;
+  const bodyAllowed = form.method !== 'GET' && form.method !== 'HEAD';
+
   return (
     <div className="grpc-wrap">
-      <div className="req-tabs" role="tablist" aria-label="Request tabs">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            className={`req-tab ${t.id === activeId ? 'active' : ''}`}
-            role="tab"
-            aria-selected={t.id === activeId}
-            onClick={() => setActiveId(t.id)}
-            title={t.form.url || 'new request'}
-          >
-            {busyMap[t.id] ? '⏳ ' : ''}
-            {tabLabel(t)}
-            {tabs.length > 1 && (
-              // Lives inside the tab button, so it stays a role="button" span:
-              // a button cannot contain another button.
-              <i
-                className="chip-x"
-                role="button"
-                tabIndex={0}
-                aria-label="close tab"
-                title="close tab"
-                onClick={(e) => { e.stopPropagation(); closeTab(t.id); }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    closeTab(t.id);
-                  }
-                }}
-              >
-                {' '}✕
-              </i>
-            )}
-          </button>
-        ))}
-        <button
-          type="button"
-          className="req-tab req-tab-add"
-          aria-label="new request tab"
-          title="new request tab"
-          onClick={addTab}
-        >+</button>
-      </div>
+      <ReqTabs
+        tabs={tabs}
+        activeId={activeId}
+        ariaLabel="Request tabs"
+        label={tabLabel}
+        title={(t) => t.form.url || 'New request'}
+        state={(t) => (busyMap[t.id] ? 'busy' : undefined)}
+        onSelect={setActiveId}
+        onClose={closeTab}
+        onAdd={addTab}
+        addTitle="New request tab"
+      />
 
-    <div className="layout">
-      <div className="left">
-        <h3>
-          HTTP <span className="badge">REST client</span>
-        </h3>
-
-        <label>Saved requests</label>
-        <div className="row field-row">
-          <select
-            className="grow"
-            value={pickedSaved}
-            onChange={(e) => {
-              setPickedSaved(e.target.value);
-              const s = saved.find((x) => x.name === e.target.value);
-              if (s) setForm(hydrate(s.form));
-            }}
-          >
-            <option value=""> - </option>
-            {saved.map((s) => (
-              <option key={s.name} value={s.name}>{s.name}</option>
-            ))}
-          </select>
-          <SaveAs
-            canSave={() => (form.url.trim() ? null : 'Enter a URL first')}
-            onSave={(name) => {
-              persistSaved([...saved.filter((s) => s.name !== name), { name, form }]);
-              setPickedSaved(name);
-              return `Saved "${name}"`;
-            }}
-            onMessage={flash}
+      <div className="layout">
+        <div className="left">
+          <PanelHead
+            title="HTTP"
+            tagline="Send a request, then read the response on the right. Every send is kept in History."
+            actions={
+              <>
+                <button
+                  className={`btn-ghost btn-sm ${curlOpen ? 'btn-on' : ''}`}
+                  title="Fill this request from a pasted cURL command"
+                  onClick={() => setCurlOpen((o) => !o)}
+                >
+                  Import cURL
+                </button>
+                <button className="btn-ghost btn-sm" title="Copy this request as a cURL command" onClick={exportCurl}>
+                  Copy as cURL
+                </button>
+              </>
+            }
           />
-          <button
-            className="btn-field btn-danger"
-            title="Delete the selected saved request"
-            disabled={!pickedSaved}
-            onClick={() => {
-              persistSaved(saved.filter((s) => s.name !== pickedSaved));
-              setPickedSaved('');
-            }}
-          >
-            delete
-          </button>
-        </div>
-        {flashMsg && <div className="toast">{flashMsg}</div>}
-        <div className="inline mt-2">
-          <button
-            className="btn-secondary"
-            title="Fill this request from a pasted cURL command"
-            onClick={() => setCurlOpen((o) => !o)}
-          >
-            import cURL
-          </button>
-          <button className="btn-secondary" title="Copy this request to the clipboard as a cURL command" onClick={exportCurl}>
-            copy as cURL
-          </button>
-        </div>
-        {curlOpen && (
-          <>
-            <textarea
-              className="mt-2"
-              rows={4}
-              spellCheck={false}
-              placeholder="curl 'https://api.example.com/v1/things' -H 'authorization: Bearer …'"
-              value={curlText}
-              onChange={(e) => setCurlText(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) importCurl(); }}
-            />
-            <div className="inline mt-2">
-              <button className="btn-field" onClick={importCurl}>fill from cURL</button>
-              <button className="btn-ghost" onClick={() => { setCurlOpen(false); setCurlText(''); }}>
-                cancel
-              </button>
-              <span className="hint">paste the whole command · ⌘/Ctrl+Enter to fill</span>
-            </div>
-          </>
-        )}
 
-        <label>Request</label>
-        <div className="row field-row">
-          <select className="w-sm" value={form.method} onChange={(e) => set('method', e.target.value)}>
-            {METHODS.map((m) => (
-              <option key={m}>{m}</option>
-            ))}
-          </select>
-          <input
-            className="grow"
-            value={form.url}
-            spellCheck={false}
-            placeholder="https://api.example.com/v1/things"
-            onChange={(e) => set('url', e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && send()}
-          />
-        </div>
-        {form.query.filter((q) => q.key).length > 0 && (
-          <div className="hint break">→ {fullUrl}</div>
-        )}
-
-        <label>Query params</label>
-        <KvTable rows={form.query} onChange={(r) => set('query', r)} ph={['key', 'value']} />
-
-        <AuthBox value={form.auth} onChange={(a) => set('auth', a)} />
-
-        <label>Body</label>
-        <select
-          className="mb-2"
-          value={form.bodyKind}
-          onChange={(e) => set('bodyKind', e.target.value as BodyKind)}
-        >
-          <option value="none">none</option>
-          <option value="json">JSON</option>
-          <option value="raw">raw / text</option>
-          <option value="form">form-urlencoded</option>
-          <option value="multipart">multipart (file upload)</option>
-        </select>
-
-        {(form.bodyKind === 'json' || form.bodyKind === 'raw') && (
-          <textarea
-            rows={9}
-            value={form.body}
-            spellCheck={false}
-            placeholder={form.bodyKind === 'json' ? '{"name":"value"}' : 'raw body…'}
-            onChange={(e) => set('body', e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
-            }}
-          />
-        )}
-        {(form.bodyKind === 'form' || form.bodyKind === 'multipart') && (
-          <KvTable rows={form.form} onChange={(r) => set('form', r)} ph={['field', 'value']} />
-        )}
-        {form.bodyKind === 'multipart' && (
-          <>
-            <label>Files</label>
-            <input
-              type="file"
-              multiple
-              onChange={async (e) => {
-                const picked = Array.from(e.target.files ?? []);
-                const items: FileItem[] = [];
-                for (const f of picked) {
-                  if (f.size > 25 * 1024 * 1024) {
-                    flash(`"${f.name}" is ${(f.size / 1048576).toFixed(1)}MB — over the 25MB limit`);
-                    continue;
-                  }
-                  // chunked base64 — avoids stack overflow on big files
-                  const bytes = new Uint8Array(await f.arrayBuffer());
-                  let bin = '';
-                  for (let i = 0; i < bytes.length; i += 0x8000)
-                    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-                  items.push({ field: 'file', name: f.name, contentB64: btoa(bin) });
-                }
-                set('files', [...form.files, ...items]);
-                e.target.value = '';
+          <div className="saved-bar">
+            <select
+              value={pickedSaved}
+              aria-label="Saved requests"
+              onChange={(e) => {
+                setPickedSaved(e.target.value);
+                const s = saved.find((x) => x.name === e.target.value);
+                if (s) setForm(hydrate(s.form));
               }}
-            />
-            {form.files.map((f, i) => (
-              <div key={i} className="row field-row mt-1">
-                <input
-                  className="max-sm"
-                  placeholder="field"
-                  value={f.field}
-                  onChange={(e) => {
-                    const next = [...form.files];
-                    next[i] = { ...f, field: e.target.value };
-                    set('files', next);
-                  }}
-                />
-                <span className="grow faint break">{f.name}</span>
-                <button
-                  className="btn-field btn-danger"
-                  title={`Remove ${f.name}`}
-                  onClick={() => set('files', form.files.filter((_, j) => j !== i))}
-                >
-                  remove
-                </button>
-              </div>
-            ))}
-          </>
-        )}
-
-        <label>Extra headers</label>
-        <textarea
-          rows={3}
-          value={form.headers}
-          spellCheck={false}
-          placeholder="x-custom: value"
-          onChange={(e) => set('headers', e.target.value)}
-        />
-        <div className="hint">one per line, as name: value</div>
-
-        <label>Timeout</label>
-        <input
-          className="w-sm"
-          value={form.timeoutMs}
-          title="Request timeout in milliseconds"
-          onChange={(e) => set('timeoutMs', e.target.value)}
-        />
-        <div className="hint">milliseconds</div>
-
-        <button disabled={busy} onClick={send}>
-          {busy ? 'Sending…' : 'Send ▶'}
-        </button>
-        <div className="hint">
-          Press <kbd>⌘↵</kbd> / <kbd>Ctrl↵</kbd> to send
-        </div>
-      </div>
-
-      <div className="right">
-        <div className="tabs" role="tablist" aria-label="Result view">
-          <button
-            type="button"
-            className={tab === 'response' ? 'tab active' : 'tab'}
-            role="tab"
-            aria-selected={tab === 'response'}
-            onClick={() => setTab('response')}
-          >
-            Response
-          </button>
-          <button
-            type="button"
-            className={tab === 'history' ? 'tab active' : 'tab'}
-            role="tab"
-            aria-selected={tab === 'history'}
-            onClick={() => setTab('history')}
-          >
-            History ({hist.length})
-          </button>
-        </div>
-
-        {tab === 'response' && (
-          <>
-            {result &&
-              (result.ok ? (
-                <div className={`status ${(result.status ?? 0) < 400 ? 'ok' : 'bad'}`}>
-                  HTTP {result.status} {result.statusText}
-                  {result.durationMs != null ? ` · ${result.durationMs}ms` : ''}
-                  {result.size != null ? ` · ${result.size}B` : ''}
-                  {result.truncated ? ' · truncated' : ''}
-                </div>
-              ) : (
-                <div className="status bad">FAILED · {result.error}</div>
-              ))}
-            {result?.ok && (
-              <div className="inline mb-2">
-                {/* One setting with mutually exclusive values, so it is a tab
-                    strip rather than three independent toggles. */}
-                <div className="inline" role="tablist" aria-label="Response view">
-                  {respViews.map((v) => (
-                    <button
-                      type="button"
-                      key={v}
-                      role="tab"
-                      className={`chip ${respViewEff === v ? 'chip-active' : ''}`}
-                      aria-selected={respViewEff === v}
-                      title={`Show the response as ${v}`}
-                      onClick={() => setRespView(v)}
-                    >
-                      {v}
-                    </button>
-                  ))}
-                </div>
-                {result.headers && (
-                  <button
-                    type="button"
-                    className={`chip ${showHeaders ? 'chip-active' : ''}`}
-                    aria-pressed={showHeaders}
-                    title="Show or hide the response headers"
-                    onClick={() => setShowHeaders((s) => !s)}
-                  >
-                    headers
-                  </button>
-                )}
-                <button
-                  className="btn-secondary"
-                  title="Copy the response body to the clipboard"
-                  onClick={() => navigator.clipboard.writeText(result.bodyText ?? '')}
-                >
-                  copy
-                </button>
-              </div>
-            )}
-            {result?.ok && showHeaders && result.headers && (
-              <pre className="mb-2">
-                {Object.entries(result.headers).map(([k, v]) => `${k}: ${v}`).join('\n')}
-              </pre>
-            )}
-            {result == null ? (
-              <div className="empty">
-                <div className="empty-icon">▶</div>
-                <div className="empty-title">No response yet</div>
-                <div className="empty-hint">
-                  Enter a URL and press <kbd>⌘↵</kbd> to send your first request.
-                </div>
-              </div>
-            ) : !result.ok ? (
-              <pre>{result.error}</pre>
-            ) : result.binary ? (
-              <div>
-                <div className="hint mb-2">
-                  binary response ({result.contentType || 'unknown type'}, {result.size}B) — not shown as text
-                </div>
-                <button
-                  className="btn-secondary"
-                  title="Save the binary response to a file"
-                  onClick={() => {
-                    const bin = atob(result.bodyBase64 ?? '');
-                    const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
-                    const url = URL.createObjectURL(new Blob([bytes], { type: result.contentType || 'application/octet-stream' }));
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'response' + (result.contentType?.includes('image/png') ? '.png' : result.contentType?.includes('pdf') ? '.pdf' : '.bin');
-                    a.click();
-                    URL.revokeObjectURL(url);
-                  }}
-                >
-                  download
-                </button>
-              </div>
-            ) : parsedResp !== undefined && respViewEff === 'tree' ? (
-              <JsonTree data={parsedResp} />
-            ) : parsedResp !== undefined && respViewEff === 'pretty' ? (
-              <pre>{JSON.stringify(parsedResp, null, 2)}</pre>
-            ) : (
-              <pre>{result.bodyText || '(empty body)'}</pre>
-            )}
-          </>
-        )}
-
-        {tab === 'history' && hist.length === 0 && (
-          <div className="empty">
-            <div className="empty-icon">🕘</div>
-            <div className="empty-title">No requests yet</div>
-            <div className="empty-hint">
-              Every request you send lands here. Send one with <kbd>⌘↵</kbd>, then click an entry to restore it.
-            </div>
-          </div>
-        )}
-
-        {tab === 'history' && hist.length > 0 && (
-          <div className="history">
-            {hist.map((h, i) => (
-              <div
-                key={i}
-                className={`hist-item ${h.ok ? 'hist-ok' : 'hist-bad'}`}
-                role="button"
-                tabIndex={rowTabIndex(i)}
-                onClick={() => restore(h)}
-                onKeyDown={rowKeyDown(() => restore(h))}
-                title="Restore this request and review its response"
-              >
-                <div className="hist-head">
-                  <b>{h.form.method} {h.form.url.replace(/^https?:\/\//, '').slice(0, 55)}</b>
-                  <span>
-                    {h.status ?? 'ERR'}
-                    {h.durationMs != null ? ` · ${h.durationMs}ms` : ''} · {new Date(h.at).toLocaleTimeString()}
-                  </span>
-                </div>
-              </div>
-            ))}
-            <button
-              className="btn-secondary btn-danger mt-2"
-              title="Delete every entry in the request history"
-              onClick={() => { setHist([]); localStorage.removeItem(LS_HISTORY); }}
             >
-              clear history
+              <option value="">{saved.length ? 'Open a saved request…' : 'No saved requests yet'}</option>
+              {saved.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <SaveAs
+              canSave={() => (form.url.trim() ? null : 'Enter a URL first')}
+              onSave={(name) => {
+                persistSaved([...saved.filter((s) => s.name !== name), { name, form }]);
+                setPickedSaved(name);
+                return `Saved "${name}"`;
+              }}
+              onMessage={flash}
+            />
+            <button
+              className="btn-secondary btn-danger"
+              title="Delete the selected saved request"
+              disabled={!pickedSaved}
+              onClick={() => {
+                persistSaved(saved.filter((s) => s.name !== pickedSaved));
+                setPickedSaved('');
+              }}
+            >
+              Delete
             </button>
           </div>
-        )}
+          {flashMsg && <div className="toast">{flashMsg}</div>}
+
+          {curlOpen && (
+            <div className="refl-box">
+              <textarea
+                rows={4}
+                spellCheck={false}
+                autoFocus
+                placeholder="curl 'https://api.example.com/v1/things' -H 'authorization: Bearer …'"
+                value={curlText}
+                onChange={(e) => setCurlText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) importCurl();
+                }}
+              />
+              <div className="inline mt-2">
+                <button className="btn-primary" onClick={importCurl}>
+                  Fill from cURL
+                </button>
+                <button
+                  className="btn-ghost"
+                  onClick={() => {
+                    setCurlOpen(false);
+                    setCurlText('');
+                  }}
+                >
+                  Cancel
+                </button>
+                <span className="hint m-0">Paste the whole command. <kbd>⌘↵</kbd> fills.</span>
+              </div>
+            </div>
+          )}
+
+          <Section title="Request">
+            <div className="row row-tight">
+              <select className="w-sm" aria-label="Method" value={form.method} onChange={(e) => set('method', e.target.value)}>
+                {METHODS.map((m) => (
+                  <option key={m}>{m}</option>
+                ))}
+              </select>
+              <input
+                className="grow"
+                value={form.url}
+                spellCheck={false}
+                aria-label="URL"
+                placeholder="https://httpbin.org/get"
+                onChange={(e) => set('url', e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && send()}
+              />
+              <button className="btn-primary" disabled={busy || !form.url.trim()} onClick={send} title="Send (Enter in the URL, or ⌘↵ in the body)">
+                {busy ? 'Sending…' : 'Send'}
+              </button>
+            </div>
+            {activeQuery > 0 ? (
+              <div className="hint break">Sends to {fullUrl}</div>
+            ) : (
+              <div className="hint">
+                Press <kbd>Enter</kbd> to send. Use <code>{'{{name}}'}</code> for values from Variables below.
+              </div>
+            )}
+          </Section>
+
+          <Section
+            title={
+              <>
+                Query params {activeQuery > 0 && <span className="count">({activeQuery})</span>}
+              </>
+            }
+            hint={<>Appended to the URL as <code>?key=value</code>, encoded for you.</>}
+          >
+            <KvTable rows={form.query} onChange={(r) => set('query', r)} ph={['key', 'value']} />
+          </Section>
+
+          <RequestVarsBox
+            key={active.id}
+            value={form.vars}
+            onChange={(v) => set('vars', v)}
+            texts={Object.values(templatesOf(form))}
+            onMessage={flash}
+          />
+
+          <AuthBox value={form.auth} onChange={(a) => set('auth', a)} />
+
+          <Section
+            title="Body"
+            hint={!bodyAllowed && form.bodyKind !== 'none' ? `${form.method} requests are sent without a body.` : undefined}
+          >
+            <div className="seg" role="group" aria-label="Body type">
+              {(
+                [
+                  ['none', 'None'],
+                  ['json', 'JSON'],
+                  ['raw', 'Text'],
+                  ['form', 'Form'],
+                  ['multipart', 'Multipart'],
+                ] as const
+              ).map(([k, label]) => (
+                <button
+                  type="button"
+                  key={k}
+                  className={form.bodyKind === k ? 'on' : ''}
+                  aria-pressed={form.bodyKind === k}
+                  title={k === 'form' ? 'application/x-www-form-urlencoded' : k === 'multipart' ? 'multipart/form-data, with file upload' : undefined}
+                  onClick={() => set('bodyKind', k)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {(form.bodyKind === 'json' || form.bodyKind === 'raw') && (
+              <textarea
+                className="mt-2"
+                rows={9}
+                value={form.body}
+                spellCheck={false}
+                aria-label="Body"
+                placeholder={form.bodyKind === 'json' ? '{"name": "value"}' : 'Raw body text'}
+                onChange={(e) => set('body', e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) send();
+                }}
+              />
+            )}
+            {(form.bodyKind === 'form' || form.bodyKind === 'multipart') && (
+              <div className="mt-2">
+                <KvTable rows={form.form} onChange={(r) => set('form', r)} ph={['field', 'value']} />
+              </div>
+            )}
+            {form.bodyKind === 'multipart' && (
+              <>
+                <label>Files</label>
+                <input
+                  type="file"
+                  multiple
+                  onChange={async (e) => {
+                    const picked = Array.from(e.target.files ?? []);
+                    const items: FileItem[] = [];
+                    for (const f of picked) {
+                      if (f.size > 25 * 1024 * 1024) {
+                        flash(`"${f.name}" is ${(f.size / 1048576).toFixed(1)}MB, over the 25MB limit`);
+                        continue;
+                      }
+                      const bytes = new Uint8Array(await f.arrayBuffer());
+                      let bin = '';
+                      for (let i = 0; i < bytes.length; i += 0x8000)
+                        bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+                      items.push({ field: 'file', name: f.name, contentB64: btoa(bin) });
+                    }
+                    set('files', [...form.files, ...items]);
+                    e.target.value = '';
+                  }}
+                />
+                {form.files.map((f, i) => (
+                  <div key={i} className="row mt-2">
+                    <input
+                      className="w-md"
+                      placeholder="field"
+                      aria-label="Form field for this file"
+                      value={f.field}
+                      onChange={(e) => {
+                        const next = [...form.files];
+                        next[i] = { ...f, field: e.target.value };
+                        set('files', next);
+                      }}
+                    />
+                    <span className="grow faint break">{f.name}</span>
+                    <button
+                      className="btn-ghost btn-icon btn-danger"
+                      title={`Remove ${f.name}`}
+                      aria-label={`Remove ${f.name}`}
+                      onClick={() => set('files', form.files.filter((_, j) => j !== i))}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </>
+            )}
+          </Section>
+
+          <Section title="Headers" hint={<>One per line, as <code>name: value</code>. Auth adds its own Authorization header.</>}>
+            <textarea
+              rows={3}
+              value={form.headers}
+              spellCheck={false}
+              aria-label="Headers"
+              placeholder="accept: application/json"
+              onChange={(e) => set('headers', e.target.value)}
+            />
+          </Section>
+
+          <Section title="Options">
+            <div className="row">
+              <label className="check" htmlFor="http-timeout">
+                Timeout
+              </label>
+              <input
+                id="http-timeout"
+                className="w-sm"
+                value={form.timeoutMs}
+                inputMode="numeric"
+                onChange={(e) => set('timeoutMs', e.target.value)}
+              />
+              <span className="hint">milliseconds</span>
+            </div>
+          </Section>
+        </div>
+
+        <div className="right">
+          <div className="tabs" role="tablist" aria-label="Result view">
+            <button
+              type="button"
+              className={tab === 'response' ? 'tab active' : 'tab'}
+              role="tab"
+              aria-selected={tab === 'response'}
+              onClick={() => setTab('response')}
+            >
+              Response
+            </button>
+            <button
+              type="button"
+              className={tab === 'history' ? 'tab active' : 'tab'}
+              role="tab"
+              aria-selected={tab === 'history'}
+              onClick={() => setTab('history')}
+            >
+              History <span className="count">{hist.length}</span>
+            </button>
+          </div>
+
+          {tab === 'response' && (
+            <>
+              {busy && <div className="status busy">Sending {form.method} {form.url}…</div>}
+              <div className={busy && result ? 'stale' : undefined}>
+              {result &&
+                (result.ok ? (
+                  <div className={`status ${(result.status ?? 0) < 400 ? 'ok' : 'bad'}`}>
+                    <span>
+                      {result.status} {result.statusText}
+                    </span>
+                    {result.durationMs != null && (
+                      <>
+                        <span className="sep">·</span>
+                        <span>{result.durationMs} ms</span>
+                      </>
+                    )}
+                    {result.size != null && (
+                      <>
+                        <span className="sep">·</span>
+                        <span>{fmtBytes(result.size)}</span>
+                      </>
+                    )}
+                    {result.truncated && (
+                      <>
+                        <span className="sep">·</span>
+                        <span>truncated</span>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <div className="status bad">Request failed</div>
+                ))}
+              {result?.ok && (
+                <div className="result-bar">
+                  {respViews.length > 1 && (
+                    <div className="seg seg-sm" role="group" aria-label="Response view">
+                      {respViews.map((v) => (
+                        <button
+                          type="button"
+                          key={v}
+                          className={respViewEff === v ? 'on' : ''}
+                          aria-pressed={respViewEff === v}
+                          title={`Show the response as ${v}`}
+                          onClick={() => setRespView(v)}
+                        >
+                          {v === 'tree' ? 'Tree' : v === 'pretty' ? 'Pretty' : 'Raw'}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {result.headers && (
+                    <button
+                      type="button"
+                      className={`btn-ghost btn-sm ${showHeaders ? 'btn-on' : ''}`}
+                      aria-pressed={showHeaders}
+                      onClick={() => setShowHeaders((s) => !s)}
+                    >
+                      Headers <span className="count">{Object.keys(result.headers).length}</span>
+                    </button>
+                  )}
+                  <span className="spacer" />
+                  <button
+                    className="btn-ghost btn-sm"
+                    title="Copy the response body"
+                    onClick={() =>
+                      navigator.clipboard.writeText(result.bodyText ?? '').then(
+                        () => flash('Response copied'),
+                        () => flash('Copy failed: the clipboard is not available'),
+                      )
+                    }
+                  >
+                    Copy
+                  </button>
+                </div>
+              )}
+              {result?.ok && showHeaders && result.headers && (
+                <table className="rtable kv-table mb-3">
+                  <tbody>
+                    {Object.entries(result.headers).map(([k, v]) => (
+                      <tr key={k}>
+                        <td>{k}</td>
+                        <td>{v}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {result ? (
+                <ResponseBody result={result} parsed={parsedResp} view={respViewEff} />
+              ) : (
+                !busy && (
+                  <Empty
+                    icon="↗"
+                    title="No response yet"
+                    hint={
+                      <>
+                        Enter a URL on the left and press <kbd>Send</kbd>. For a first try, use{' '}
+                        <code>GET https://httpbin.org/get</code>, which echoes your request back as JSON.
+                      </>
+                    }
+                  >
+                    <button className="btn-secondary btn-sm" onClick={() => loadExample(EXAMPLES.http)}>
+                      Fill in this example
+                    </button>
+                  </Empty>
+                )
+              )}
+              </div>
+            </>
+          )}
+
+          {tab === 'history' && hist.length === 0 && (
+            <Empty
+              icon="↺"
+              title="No requests yet"
+              hint="Every request you send lands here with its response. Click an entry to bring it back."
+            />
+          )}
+
+          {tab === 'history' && hist.length > 0 && (
+            <div className="history">
+              {hist.map((h, i) => (
+                <div
+                  key={i}
+                  className={`hist-item ${h.ok ? 'hist-ok' : 'hist-bad'}`}
+                  role="button"
+                  tabIndex={rowTabIndex(i)}
+                  onClick={() => restore(h)}
+                  onKeyDown={rowKeyDown(() => restore(h))}
+                  title="Restore this request and its response"
+                >
+                  <div className="hist-head">
+                    <b className="break">
+                      {h.form.method} {h.form.url.replace(/^https?:\/\//, '').slice(0, 70)}
+                    </b>
+                    <span>
+                      <span className={h.ok ? 'text-ok' : 'text-bad'}>{h.status ?? 'ERR'}</span>
+                      {h.durationMs != null ? `· ${h.durationMs} ms` : ''} · {new Date(h.at).toLocaleTimeString()}
+                    </span>
+                  </div>
+                </div>
+              ))}
+              <div className="mt-2">
+                <button
+                  className="btn-secondary btn-danger btn-sm"
+                  title="Delete every entry in the request history"
+                  onClick={() => {
+                    setHist([]);
+                    localStorage.removeItem(LS_HISTORY);
+                  }}
+                >
+                  Clear history
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
     </div>
   );
 }

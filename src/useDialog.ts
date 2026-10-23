@@ -23,6 +23,8 @@ export function useDialog(open: boolean, close: () => void) {
   /* Whatever had focus when the dialog opened, so it can be handed back. Losing
      it would drop the caret to the top of the document on close. */
   const restoreTo = useRef<HTMLElement | null>(null);
+  const closeRef = useRef(close);
+  closeRef.current = close;
 
   useEffect(() => {
     if (!open) return;
@@ -37,7 +39,7 @@ export function useDialog(open: boolean, close: () => void) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        close();
+        closeRef.current();
         return;
       }
       if (e.key !== 'Tab') return;
@@ -57,7 +59,7 @@ export function useDialog(open: boolean, close: () => void) {
       document.removeEventListener('keydown', onKey);
       restoreTo.current?.focus?.();
     };
-  }, [open, close]);
+  }, [open]);
 
   return ref;
 }

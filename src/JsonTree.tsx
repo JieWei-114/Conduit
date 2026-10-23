@@ -1,18 +1,21 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
+
+const PAGE = 200;
 
 /** Collapsible JSON viewer. Click a row to copy its path (e.g. data.items[0].id). */
-export default function JsonTree({ data }: { data: unknown }) {
+export default memo(function JsonTree({ data }: { data: unknown }) {
   return (
     <div className="jtree">
       <Node k={null} v={data} path="" depth={0} />
     </div>
   );
-}
+});
 
 function Node({ k, v, path, depth }: { k: string | null; v: unknown; path: string; depth: number }) {
   const isObj = v !== null && typeof v === 'object';
   const isArr = Array.isArray(v);
-  const [open, setOpen] = useState(depth < 2); // auto-expand first couple levels
+  const [open, setOpen] = useState(depth < 2);
+  const [limit, setLimit] = useState(PAGE);
   const keyLabel = k === null ? '' : `${k}: `;
 
   const copyPath = (e: React.MouseEvent | React.KeyboardEvent) => {
@@ -67,7 +70,7 @@ function Node({ k, v, path, depth }: { k: string | null; v: unknown; path: strin
       </div>
       {open && (
         <div className="jchildren">
-          {entries.map(([ck, cv]) => (
+          {entries.slice(0, limit).map(([ck, cv]) => (
             <Node
               key={ck}
               k={ck}
@@ -76,6 +79,22 @@ function Node({ k, v, path, depth }: { k: string | null; v: unknown; path: strin
               depth={depth + 1}
             />
           ))}
+          {entries.length > limit && (
+            <div
+              className="jrow jmore"
+              role="button"
+              tabIndex={0}
+              onClick={() => setLimit((l) => l + PAGE * 5)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  setLimit((l) => l + PAGE * 5);
+                }
+              }}
+            >
+              … {entries.length - limit} more, click to show
+            </div>
+          )}
           <div className="jrow jbrace">{brace[1]}</div>
         </div>
       )}
