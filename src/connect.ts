@@ -4,6 +4,7 @@
  * the same way.
  */
 import type { CallResult } from './types';
+import { joinUrl } from './url';
 
 /** Connect error codes (`"not_found"`) as gRPC status numbers. */
 const CODES: Record<string, string> = {
@@ -46,7 +47,7 @@ export async function callConnect(opts: {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      url: `${opts.base.replace(/\/$/, '')}/${opts.service}/${opts.method}`,
+      url: joinUrl(opts.base, opts.service, opts.method),
       method: 'POST',
       headers,
       bodyKind: 'raw',
