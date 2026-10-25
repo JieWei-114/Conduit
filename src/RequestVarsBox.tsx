@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { SaveAs } from './SaveAs';
 import { useArmedConfirm } from './useArmedConfirm';
 import { useDialog } from './useDialog';
+import { LongField } from './ui';
 import { VarList } from './VarList';
 import { referencedNames } from './ops';
 import {
@@ -247,13 +248,13 @@ export function RequestVarsBox({
                       <option value="json">JSON</option>
                       <option value="header">Header</option>
                     </select>
-                    <input
+                    <LongField
                       className="mono"
                       value={x.path}
                       spellCheck={false}
                       placeholder={x.from === 'json' ? 'data.token' : 'x-request-id'}
                       aria-label={x.from === 'json' ? 'JSON path' : 'Header name'}
-                      onChange={(e) => setExtract(i, { path: e.target.value })}
+                      onChange={(path) => setExtract(i, { path })}
                     />
                     <button
                       type="button"

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
-import { ConnPill, Empty, FeedRow, PanelHead, ReqTabs, Section, persistLater } from './ui';
+import { ConnPill, Empty, FeedRow, LongField, PanelHead, ReqTabs, Section, persistLater } from './ui';
 
 const LS_CONN = 'conduit.kafka.conn.v1';
 const LS_CONNS = 'conduit.kafka.conns.v1';
@@ -316,12 +316,14 @@ export default function KafkaPanel() {
           <Section title="Connection" hint="Shared by every tab in this panel.">
             <label className="field-first">Brokers</label>
             <div className="row row-tight">
-              <input
+              <LongField
+                url
                 className="grow"
                 value={conn.brokers}
                 spellCheck={false}
+                aria-label="Brokers"
                 placeholder="localhost:9092"
-                onChange={(e) => setConn('brokers', e.target.value)}
+                onChange={(v) => setConn('brokers', v)}
               />
               <button className="btn-secondary" onClick={listTopics}>
                 List topics
@@ -363,7 +365,7 @@ export default function KafkaPanel() {
                     onClick={() => editConsumeField('topic', t)}
                     title="Use this topic in the current tab"
                   >
-                    <span className="kname">{t}</span>
+                    <span className="kname" title={t}>{t}</span>
                   </div>
                 ))}
               </div>
@@ -377,18 +379,15 @@ export default function KafkaPanel() {
           <label className="field-first">
             Topic <span className="count">(this tab)</span>
           </label>
-          <input
-            list="kafka-topics-r"
+          <LongField
+            url
+            suggestions={topics}
             value={active.topic}
             spellCheck={false}
+            aria-label="Topic"
             placeholder="orders"
-            onChange={(e) => setA('topic', e.target.value)}
+            onChange={(v) => setA('topic', v)}
           />
-          <datalist id="kafka-topics-r">
-            {topics.map((t) => (
-              <option key={t} value={t} />
-            ))}
-          </datalist>
 
           <div className="tabs mt-4" role="tablist" aria-label="Direction">
             <button
@@ -415,7 +414,7 @@ export default function KafkaPanel() {
             <div className="conn-row mt-0">
               <div className="grow">
                 <label className="field-first">Key</label>
-                <input placeholder="order-123" value={active.key} spellCheck={false} onChange={(e) => setA('key', e.target.value)} />
+                <LongField aria-label="Key" placeholder="order-123" value={active.key} spellCheck={false} onChange={(v) => setA('key', v)} />
               </div>
             </div>
             <div className="hint">Optional. Picks the partition, so records with the same key stay in order.</div>
@@ -447,12 +446,12 @@ export default function KafkaPanel() {
 
           <div hidden={rtab !== 'consume'}>
             <div className="row">
-              <input
+              <LongField
                 className="grow"
                 placeholder="group id (blank = throwaway group)"
                 aria-label="Consumer group id"
                 value={active.group}
-                onChange={(e) => setA('group', e.target.value)}
+                onChange={(v) => setA('group', v)}
               />
               <label className="check" title="Read the topic from the earliest retained offset instead of the newest">
                 <input

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import { ConnPill, Empty, PanelHead, Section, tryJson } from './ui';
+import { ConnPill, Empty, LongField, PanelHead, Section, tryJson } from './ui';
 import { useFlash } from './useFlash';
 
 interface Hit {
@@ -101,7 +101,7 @@ export default function WebhookPanel() {
 
         <Section title="Capture URL" flush>
           <div className="row row-tight">
-            <input className="grow" readOnly value={captureUrl} spellCheck={false} aria-label="Capture URL" onFocus={(e) => e.target.select()} />
+            <LongField url className="grow" readOnly value={captureUrl} spellCheck={false} aria-label="Capture URL" onFocus={(e) => e.target.select()} />
             <button
               className="btn-secondary"
               title="Copy the capture URL"
@@ -132,11 +132,12 @@ export default function WebhookPanel() {
             </div>
             <div className="grow">
               <label className="field-first">Content type</label>
-              <input
+              <LongField
                 value={resp.contentType}
                 spellCheck={false}
                 placeholder="application/json"
-                onChange={(e) => setResp((r) => ({ ...r, contentType: e.target.value }))}
+                aria-label="Content type"
+                onChange={(v) => setResp((r) => ({ ...r, contentType: v }))}
               />
             </div>
           </div>

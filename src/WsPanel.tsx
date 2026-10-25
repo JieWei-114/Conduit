@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
-import { ConnPill, Empty, FeedRow, PanelHead, ReqTabs, Section, usePersist } from './ui';
+import { ConnPill, Empty, FeedRow, LongField, PanelHead, ReqTabs, Section, usePersist } from './ui';
 import { EXAMPLES } from './examples';
 
 const LS_TABS = 'conduit.ws.tabs.v1';
@@ -477,15 +477,16 @@ export default function WsPanel() {
             actions={<ConnPill state={pillState} text={connState === 'error' ? 'Error' : connText} />}
           >
             <div className="row row-tight">
-              <input
+              <LongField
+                url
                 className="grow"
                 value={form.url}
                 spellCheck={false}
                 aria-label="URL"
                 placeholder={sse ? 'https://host/events' : sio ? 'http://host:3000' : 'wss://echo.websocket.org'}
                 disabled={!editable}
-                onChange={(e) => set('url', e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && connect(active.id)}
+                onChange={(v) => set('url', v)}
+                onEnter={() => connect(active.id)}
               />
               <button
                 className={live || connState === 'connecting' ? 'btn-secondary btn-on' : 'btn-primary'}
@@ -518,11 +519,11 @@ export default function WsPanel() {
                 <div className="hint">Where Socket.IO is mounted, and the namespace to join (/ is the default).</div>
 
                 <label>Handshake query</label>
-                <input value={form.sioQuery} spellCheck={false} placeholder="token=abc&room=1" disabled={!editable} onChange={(e) => set('sioQuery', e.target.value)} />
+                <LongField url aria-label="Handshake query" value={form.sioQuery} spellCheck={false} placeholder="token=abc&room=1" disabled={!editable} onChange={(v) => set('sioQuery', v)} />
                 <div className="hint">Added to the handshake URL, for servers that read auth there.</div>
 
                 <label>Auth JSON</label>
-                <input value={form.sioAuth} spellCheck={false} placeholder={'{"token":"…"}'} disabled={!editable} onChange={(e) => set('sioAuth', e.target.value)} />
+                <LongField aria-label="Auth JSON" value={form.sioAuth} spellCheck={false} placeholder={'{"token":"…"}'} disabled={!editable} onChange={(v) => set('sioAuth', v)} />
                 <div className="hint">Sent in the CONNECT packet, for servers that read auth there.</div>
               </>
             )}
@@ -541,7 +542,7 @@ export default function WsPanel() {
             {!sse && !sio && (
               <>
                 <label>Subprotocols</label>
-                <input value={form.protocols} spellCheck={false} placeholder="graphql-ws" disabled={!editable} onChange={(e) => set('protocols', e.target.value)} />
+                <LongField aria-label="Subprotocols" value={form.protocols} spellCheck={false} placeholder="graphql-ws" disabled={!editable} onChange={(v) => set('protocols', v)} />
                 <div className="hint">Optional, comma-separated.</div>
               </>
             )}

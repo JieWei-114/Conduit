@@ -6,7 +6,7 @@ import { RequestVarsBox } from './RequestVarsBox';
 import { callConnect } from './connect';
 import { withoutSecretValues } from './VarList';
 import { useFlash } from './useFlash';
-import { Empty, PanelHead, ReqTabs, Section, persistLater } from './ui';
+import { Empty, LongField, PanelHead, ReqTabs, Section, persistLater } from './ui';
 import { EXAMPLES, useExample } from './examples';
 import {
   activeEnv,
@@ -26,6 +26,7 @@ import type {
   ProtoInfo,
   RpcDef,
 } from './types';
+import { joinUrl } from './url';
 
 const LS_FORM = 'grpcwebtester.form.v3';
 const LS_HISTORY = 'grpcwebtester.history.v1';
@@ -551,7 +552,7 @@ export default function GrpcPanel() {
   };
 
   const autoUrl = current
-    ? `${form.base.replace(/\/$/, '')}${form.prefix}/${info!.pkg}.${current.service}/${current.method}`
+    ? joinUrl(form.base, form.prefix, `${info!.pkg}.${current.service}`, current.method)
     : '';
   const url = form.urlOverride || autoUrl;
 
@@ -1154,11 +1155,11 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                 <div className="conn-row">
                   <div className="grow">
                     <label>Host</label>
-                    <input
+                    <LongField
                       value={form.targetHost}
                       spellCheck={false}
                       placeholder="localhost"
-                      onChange={(e) => set('targetHost', e.target.value)}
+                      onChange={(v) => set('targetHost', v)}
                     />
                   </div>
                   <div className="conn-sm">
@@ -1226,36 +1227,34 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                     Delete
                   </button>
                 </div>
-                <input
+                <LongField
+                  url
                   className="mt-2"
                   value={form.base}
                   spellCheck={false}
                   aria-label="Gateway base URL"
                   placeholder="https://gateway.example.com"
-                  onChange={(e) => {
-                    set('base', e.target.value);
+                  onChange={(v) => {
+                    set('base', v);
                     set('urlOverride', '');
                   }}
                 />
 
                 <label>Route prefix</label>
                 <div className="row row-tight">
-                  <input
+                  <LongField
+                    url
                     className="grow"
-                    list="grpc-prefixes"
+                    suggestions={savedPrefixes}
                     value={form.prefix}
                     spellCheck={false}
+                    aria-label="Route prefix"
                     placeholder="/myservice"
-                    onChange={(e) => {
-                      set('prefix', e.target.value);
+                    onChange={(v) => {
+                      set('prefix', v);
                       set('urlOverride', '');
                     }}
                   />
-                  <datalist id="grpc-prefixes">
-                    {savedPrefixes.map((p) => (
-                      <option key={p} value={p} />
-                    ))}
-                  </datalist>
                   <button className="btn-secondary" onClick={savePrefix}>
                     Save
                   </button>
@@ -1395,7 +1394,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
             {!reflecting && (
               <>
                 <label className="field-first">Proto folder</label>
-                <input value={form.root} spellCheck={false} onChange={(e) => set('root', e.target.value)} />
+                <LongField aria-label="Proto folder" value={form.root} spellCheck={false} onChange={(v) => set('root', v)} />
                 <div className="hint">Folder scanned for .proto files.</div>
                 {rootError && <div className="error">{rootError}</div>}
 
@@ -1446,7 +1445,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
             {form.transport === 'gateway' && (
               <>
                 <label>Full URL</label>
-                <input value={url} spellCheck={false} onChange={(e) => set('urlOverride', e.target.value)} />
+                <LongField url aria-label="Full URL" value={url} spellCheck={false} onChange={(v) => set('urlOverride', v)} />
                 <div className="hint">Built from base URL + prefix + method. Edit it to override.</div>
               </>
             )}
@@ -1814,7 +1813,7 @@ function HistItem({
           </button>
         </span>
       </div>
-      {h.body && <div className="hist-body">{h.body}</div>}
+      {h.body && <div className="hist-body" title={h.body}>{h.body}</div>}
     </div>
   );
 }
@@ -1881,14 +1880,14 @@ function HealthCheck({
         </span>
       </label>
       <div className="row">
-        <input
+        <LongField
           className="grow"
           value={service}
           spellCheck={false}
           placeholder="service name, or empty for the whole server"
           aria-label="Health check service"
-          onChange={(e) => setService(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && check()}
+          onChange={setService}
+          onEnter={() => check()}
         />
         <button className="btn-secondary" disabled={busy} onClick={check} title="grpc.health.v1.Health/Check">
           {busy ? 'Checking…' : 'Check health'}

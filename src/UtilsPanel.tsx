@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Empty, PanelHead } from './ui';
+import { Empty, LongField, PanelHead } from './ui';
 import { useExample } from './examples';
 import RecipeEditor from './RecipeEditor';
 
@@ -232,7 +232,7 @@ export default function UtilsPanel() {
           <>
             {title('time')}
             <label>Timestamp or date</label>
-            <input value={ts} spellCheck={false} placeholder="1700000000  ·  or  2026-08-17T10:00:00Z" onChange={(e) => setTs(e.target.value)} />
+            <LongField value={ts} spellCheck={false} aria-label="Timestamp or date" placeholder="1700000000  ·  or  2026-08-17T10:00:00Z" onChange={setTs} />
             <div className="hint">Ten digits are read as seconds, thirteen as milliseconds.</div>
             <div className="inline mt-2">
               <button className="btn-secondary btn-sm" onClick={() => setTs(String(Math.floor(browserNow() / 1000)))}>Now (s)</button>
@@ -252,7 +252,7 @@ export default function UtilsPanel() {
           <>
             {title('cron')}
             <label>Expression</label>
-            <input value={cron} spellCheck={false} placeholder="*/5 9-17 * * 1-5" onChange={(e) => setCron(e.target.value)} />
+            <LongField value={cron} spellCheck={false} aria-label="Cron expression" placeholder="*/5 9-17 * * 1-5" onChange={setCron} />
             <div className="hint">Five fields, in order: minute, hour, day-of-month, month, day-of-week.</div>
             {cron.trim() ? (
               <div className="mt-3">

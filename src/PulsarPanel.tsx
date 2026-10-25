@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import { useArmedConfirm } from './useArmedConfirm';
-import { ConnPill, Empty, FeedRow, PanelHead, ReqTabs, Section, persistLater } from './ui';
+import { ConnPill, Empty, FeedRow, LongField, PanelHead, ReqTabs, Section, persistLater } from './ui';
 import type { PulsarConnConfig, PulsarMessageIn } from './types';
 
 const LS_CONNS = 'conduit.pulsar.conns.v1';
@@ -464,7 +464,7 @@ export default function PulsarPanel() {
 
           <Section title="Broker" hint="Shared by every tab in this panel.">
             <label className="field-first">Service URL</label>
-            <input value={conn.serviceUrl} spellCheck={false} placeholder="pulsar://localhost:6650" onChange={(e) => setC('serviceUrl', e.target.value)} />
+            <LongField url aria-label="Service URL" value={conn.serviceUrl} spellCheck={false} placeholder="pulsar://localhost:6650" onChange={(v) => setC('serviceUrl', v)} />
             <div className="hint">
               <code>pulsar://host:6650</code> or <code>pulsar+ssl://host:6651</code>.
             </div>
@@ -497,11 +497,11 @@ export default function PulsarPanel() {
             {conn.authType === 'oauth2' && (
               <>
                 <label>Issuer URL</label>
-                <input value={conn.oauth!.issuerUrl} spellCheck={false} onChange={(e) => setC('oauth', { ...conn.oauth!, issuerUrl: e.target.value })} />
+                <LongField url aria-label="Issuer URL" value={conn.oauth!.issuerUrl} spellCheck={false} onChange={(v) => setC('oauth', { ...conn.oauth!, issuerUrl: v })} />
                 <div className="conn-row">
                   <div className="grow">
                     <label>Client ID</label>
-                    <input value={conn.oauth!.clientId} spellCheck={false} onChange={(e) => setC('oauth', { ...conn.oauth!, clientId: e.target.value })} />
+                    <LongField aria-label="Client ID" value={conn.oauth!.clientId} spellCheck={false} onChange={(v) => setC('oauth', { ...conn.oauth!, clientId: v })} />
                   </div>
                   <div className="grow">
                     <label>Client secret</label>
@@ -509,20 +509,21 @@ export default function PulsarPanel() {
                   </div>
                 </div>
                 <label>Audience</label>
-                <input value={conn.oauth!.audience} spellCheck={false} onChange={(e) => setC('oauth', { ...conn.oauth!, audience: e.target.value })} />
+                <LongField aria-label="Audience" value={conn.oauth!.audience} spellCheck={false} onChange={(v) => setC('oauth', { ...conn.oauth!, audience: v })} />
               </>
             )}
           </Section>
 
           <Section title="Admin API" hint="Optional. Lists topics and enables Subscriptions, Peek and Stats.">
             <div className="row row-tight">
-              <input
+              <LongField
+                url
                 className="grow"
                 value={adminUrl}
                 spellCheck={false}
                 aria-label="Admin URL"
                 placeholder="http://localhost:8080"
-                onChange={(e) => setAdminUrl(e.target.value)}
+                onChange={setAdminUrl}
               />
               <button className="btn-secondary" disabled={needAdmin} onClick={loadTenants}>
                 Load tenants
@@ -559,7 +560,7 @@ export default function PulsarPanel() {
                     title="Use this topic in the current tab"
                     onClick={() => editConsumeField('topic', t)}
                   >
-                    <span className="kname">{t}</span>
+                    <span className="kname" title={t}>{t}</span>
                   </div>
                 ))}
               </div>
@@ -572,18 +573,15 @@ export default function PulsarPanel() {
           <label className="field-first">
             Topic <span className="count">(this tab)</span>
           </label>
-          <input
-            list="pulsar-topics"
+          <LongField
+            url
+            suggestions={topics}
             value={active.topic}
             spellCheck={false}
-            onChange={(e) => editConsumeField('topic', e.target.value)}
+            aria-label="Topic"
+            onChange={(v) => editConsumeField('topic', v)}
             placeholder="persistent://public/default/my-topic"
           />
-          <datalist id="pulsar-topics">
-            {topics.map((t) => (
-              <option key={t} value={t} />
-            ))}
-          </datalist>
 
           <div className="tabs mt-4" role="tablist" aria-label="Pulsar view">
             {(
@@ -627,7 +625,7 @@ export default function PulsarPanel() {
             <div className="conn-row">
               <div className="grow">
                 <label>Key</label>
-                <input value={active.key} spellCheck={false} placeholder="order-123" onChange={(e) => setA('key', e.target.value)} />
+                <LongField aria-label="Key" value={active.key} spellCheck={false} placeholder="order-123" onChange={(v) => setA('key', v)} />
               </div>
               <div className="w-md">
                 <label>Deliver after (ms)</label>
@@ -748,12 +746,12 @@ export default function PulsarPanel() {
 
           <div hidden={rtab !== 'consume'}>
             <div className="row">
-              <input
+              <LongField
                 className="grow"
                 placeholder="subscription (blank = auto, unique)"
                 aria-label="Subscription name"
                 value={active.subscription}
-                onChange={(e) => editConsumeField('subscription', e.target.value)}
+                onChange={(v) => editConsumeField('subscription', v)}
               />
               <select className="w-sm" value={active.subType} aria-label="Subscription type" onChange={(e) => editConsumeField('subType', e.target.value)} title="Subscription type">
                 <option>Exclusive</option>

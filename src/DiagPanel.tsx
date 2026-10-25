@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Empty, PanelHead } from './ui';
+import { Empty, LongField, PanelHead } from './ui';
 
 const LS = 'conduit.diag.v1';
 
@@ -188,7 +188,7 @@ export default function DiagPanel() {
           <>
             {title('tcp')}
             <div className="row">
-              <input className="grow" aria-label="Host" value={f.tcpHost} spellCheck={false} placeholder="host, e.g. example.com" onChange={(e) => set('tcpHost', e.target.value)} />
+              <LongField className="grow" aria-label="Host" value={f.tcpHost} spellCheck={false} placeholder="host, e.g. example.com" onChange={(v) => set('tcpHost', v)} />
               <input className="w-xs" aria-label="Port" value={f.tcpPort} placeholder="443" onChange={(e) => set('tcpPort', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runTcp()} />
               <button className="btn-primary" disabled={!f.tcpHost.trim() || !f.tcpPort.trim()} onClick={runTcp}>Check</button>
             </div>
@@ -220,7 +220,7 @@ export default function DiagPanel() {
           <>
             {title('tls')}
             <div className="row">
-              <input className="grow" aria-label="Host" value={f.tlsHost} spellCheck={false} placeholder="host, e.g. example.com" onChange={(e) => set('tlsHost', e.target.value)} />
+              <LongField className="grow" aria-label="Host" value={f.tlsHost} spellCheck={false} placeholder="host, e.g. example.com" onChange={(v) => set('tlsHost', v)} />
               <input className="w-xs" aria-label="Port" value={f.tlsPort} placeholder="443" onChange={(e) => set('tlsPort', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runTls()} />
               <button className="btn-primary" disabled={!f.tlsHost.trim()} onClick={runTls}>Check</button>
             </div>
@@ -269,7 +269,7 @@ export default function DiagPanel() {
           <>
             {title('dns')}
             <div className="row">
-              <input className="grow" aria-label="Hostname" value={f.dnsHost} spellCheck={false} placeholder="hostname, e.g. example.com" onChange={(e) => set('dnsHost', e.target.value)} onKeyDown={(e) => e.key === 'Enter' && runDns()} />
+              <LongField className="grow" aria-label="Hostname" value={f.dnsHost} spellCheck={false} placeholder="hostname, e.g. example.com" onChange={(v) => set('dnsHost', v)} onEnter={() => runDns()} />
               <button className="btn-primary" disabled={!f.dnsHost.trim()} onClick={runDns}>Resolve</button>
             </div>
             {dns ? (
@@ -326,7 +326,7 @@ export default function DiagPanel() {
                           {!r ? (
                             <span className="badge">not run</span>
                           ) : (
-                            <span className={`pill ${passed ? 'ok' : 'bad'}`}>{passed ? `PASS ${r.status ?? ''}` : `FAIL ${r.status ?? r.error ?? ''}`}</span>
+                            <span className={`pill ${passed ? 'ok' : 'bad'}`} title={passed ? undefined : String(r.error ?? r.status ?? '')}>{passed ? `PASS ${r.status ?? ''}` : `FAIL ${r.status ?? r.error ?? ''}`}</span>
                           )}
                         </td>
                         <td className="nowrap">{r?.ms != null ? `${r.ms}ms` : ''}</td>

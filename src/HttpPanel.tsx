@@ -6,7 +6,7 @@ import JsonTree from './JsonTree';
 import { rowKeyDown, rowTabIndex } from './rowNav';
 import { RequestVarsBox } from './RequestVarsBox';
 import { withoutSecretValues } from './VarList';
-import { Empty, PanelHead, ReqTabs, Section, usePersist } from './ui';
+import { Empty, LongField, PanelHead, ReqTabs, Section, usePersist } from './ui';
 import { EXAMPLES, useExample } from './examples';
 import {
   activeEnv,
@@ -18,6 +18,7 @@ import {
   useEnvs,
   type RequestVars,
 } from './vars';
+import { appendQuery } from './url';
 
 const LS_FORM = 'conduit.http.form.v2';
 const LS_TABS = 'conduit.http.tabs.v1';
@@ -197,7 +198,7 @@ function urlOf(f: HttpForm): string {
   const active = f.query.filter((q) => q.key);
   if (!active.length) return f.url;
   const qs = active.map((q) => `${encodeURIComponent(q.key)}=${encodeURIComponent(q.value)}`).join('&');
-  return f.url + (f.url.includes('?') ? '&' : '?') + qs;
+  return appendQuery(f.url, qs);
 }
 
 // ── Chrome-style request tabs: each tab is an independent request; history +
@@ -302,12 +303,12 @@ function KvTable({
             aria-label={`${ph[0]} ${i + 1}`}
             onChange={(e) => edit(i, { key: e.target.value })}
           />
-          <input
+          <LongField
             placeholder={ph[1]}
             value={r.value}
             spellCheck={false}
             aria-label={`${ph[1]} ${i + 1}`}
-            onChange={(e) => edit(i, { value: e.target.value })}
+            onChange={(value) => edit(i, { value })}
           />
           {i < rows.length ? (
             <button
@@ -708,14 +709,15 @@ export default function HttpPanel() {
                   <option key={m}>{m}</option>
                 ))}
               </select>
-              <input
+              <LongField
+                url
                 className="grow"
                 value={form.url}
                 spellCheck={false}
                 aria-label="URL"
                 placeholder="https://httpbin.org/get"
-                onChange={(e) => set('url', e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && send()}
+                onChange={(v) => set('url', v)}
+                onEnter={() => send()}
               />
               <button className="btn-primary" disabled={busy || !form.url.trim()} onClick={send} title="Send (Enter in the URL, or ⌘↵ in the body)">
                 {busy ? 'Sending…' : 'Send'}
@@ -1031,7 +1033,7 @@ export default function HttpPanel() {
                   title="Restore this request and its response"
                 >
                   <div className="hist-head">
-                    <b className="break">
+                    <b className="break" title={`${h.form.method} ${h.form.url}`}>
                       {h.form.method} {h.form.url.replace(/^https?:\/\//, '').slice(0, 70)}
                     </b>
                     <span>

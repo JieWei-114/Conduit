@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { hasLiteral } from './ops';
+import { LongField } from './ui';
 
 /**
  * A text field for a value that may be secret. While `secret` is set and the value holds a
@@ -14,6 +15,7 @@ export function SecretField({
   multiline = false,
   placeholder,
   ariaLabel,
+  onEnter,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -21,6 +23,7 @@ export function SecretField({
   multiline?: boolean;
   placeholder?: string;
   ariaLabel?: string;
+  onEnter?: () => void;
 }) {
   const [revealed, setRevealed] = useState(false);
   const masked = secret && !revealed && hasLiteral(value);
@@ -50,14 +53,15 @@ export function SecretField({
           onChange={(e) => onChange(e.target.value)}
         />
       ) : (
-        <input
-          type={masked ? 'password' : 'text'}
+        <LongField
           value={value}
           spellCheck={false}
           autoComplete="off"
           placeholder={placeholder}
           aria-label={ariaLabel}
-          onChange={(e) => onChange(e.target.value)}
+          className={masked ? 'masked' : undefined}
+          onChange={onChange}
+          onEnter={onEnter}
         />
       )}
       {toggle}

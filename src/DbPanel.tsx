@@ -3,7 +3,7 @@ import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import { rowKeyDown, rowTabIndex } from './rowNav';
 import { useDialog } from './useDialog';
-import { Empty, PanelHead, ReqTabs, Section, usePersist } from './ui';
+import { Empty, LongField, PanelHead, ReqTabs, Section, usePersist } from './ui';
 import { EXAMPLES } from './examples';
 
 const LS_FORM = 'conduit.db.form.v1';
@@ -318,13 +318,14 @@ export default function DbPanel() {
                 <option value="mongodb">MongoDB</option>
                 <option value="clickhouse">ClickHouse</option>
               </select>
-              <input
+              <LongField
+                url
                 className="grow"
                 value={form.url}
                 spellCheck={false}
                 aria-label="Connection URL"
                 placeholder={PLACEHOLDER_URL[form.driver]}
-                onChange={(e) => set('url', e.target.value)}
+                onChange={(v) => set('url', v)}
               />
             </div>
             <div className="hint">
@@ -360,7 +361,7 @@ export default function DbPanel() {
                       }}
                       title={`Run a first-rows query on ${t}`}
                     >
-                      <span className="kname">{t}</span>
+                      <span className="kname" title={t}>{t}</span>
                     </div>
                   ))}
                 </div>

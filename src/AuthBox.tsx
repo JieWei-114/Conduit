@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Section } from './ui';
+import { LongField, Section } from './ui';
 
 /**
  * Reusable auth block: Bearer (JWT) / Basic / Raw header / OAuth2
@@ -152,18 +152,18 @@ export default function AuthBox({
           {a.type === 'oauth2' && (
             <>
               <label className="field-first">Token endpoint</label>
-              <input value={a.oauthIssuer} spellCheck={false} placeholder="https://auth.example.com/oauth/token"
-                onChange={(e) => set('oauthIssuer', e.target.value)} />
+              <LongField url value={a.oauthIssuer} spellCheck={false} placeholder="https://auth.example.com/oauth/token"
+                onChange={(v) => set('oauthIssuer', v)} />
               <div className="hint">The issuer URL that exchanges client credentials for a token.</div>
               <div className="row mt-2">
-                <input placeholder="client_id" value={a.oauthClientId} spellCheck={false}
-                  onChange={(e) => set('oauthClientId', e.target.value)} />
+                <LongField placeholder="client_id" value={a.oauthClientId} spellCheck={false}
+                  onChange={(v) => set('oauthClientId', v)} />
                 <input type="password" placeholder="client_secret" value={a.oauthClientSecret}
                   onChange={(e) => set('oauthClientSecret', e.target.value)} />
               </div>
               <div className="row mt-2">
-                <input className="grow" placeholder="audience (optional)" value={a.oauthAudience} spellCheck={false}
-                  onChange={(e) => set('oauthAudience', e.target.value)} />
+                <LongField className="grow" placeholder="audience (optional)" value={a.oauthAudience} spellCheck={false}
+                  onChange={(v) => set('oauthAudience', v)} />
                 <button className="btn-secondary" title="Exchange the client credentials for an access token"
                   disabled={!a.oauthIssuer.trim()} onClick={fetchToken}>
                   Get token
@@ -199,8 +199,8 @@ export default function AuthBox({
 
       {a.type === 'raw' && (
         <>
-          <input aria-label="Authorization value" value={a.raw} spellCheck={false} placeholder="Token abc123  ·  Bearer xyz  ·  custom-scheme …"
-            onChange={(e) => set('raw', e.target.value)} />
+          <LongField aria-label="Authorization value" value={a.raw} spellCheck={false} placeholder="Token abc123  ·  Bearer xyz  ·  custom-scheme …"
+            onChange={(v) => set('raw', v)} />
           <div className="hint">Sent as the whole Authorization header value, any scheme.</div>
         </>
       )}

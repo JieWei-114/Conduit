@@ -3,7 +3,7 @@ import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import { useArmedConfirm } from './useArmedConfirm';
 import type { RedisKeyView, RedisType } from './types';
-import { Empty, FeedRow, PanelHead, Section, tryJson, useStableCallback } from './ui';
+import { Empty, FeedRow, LongField, PanelHead, Section, tryJson, useStableCallback } from './ui';
 import { EXAMPLES, useExample } from './examples';
 
 const LS_CONNS = 'conduit.redis.conns.v3';
@@ -389,11 +389,13 @@ export default function RedisPanel() {
           <div className="conn-row mt-0">
             <div className="grow">
               <label>Host</label>
-              <input
+              <LongField
+                url
                 value={host}
                 spellCheck={false}
+                aria-label="Host"
                 placeholder="127.0.0.1 or redis://host:port"
-                onChange={(e) => setHost(e.target.value)}
+                onChange={setHost}
               />
             </div>
             <div className="conn-sm">
@@ -426,14 +428,14 @@ export default function RedisPanel() {
 
         <Section title="Keys" hint="An exact key opens its value; anything else is browsed as a prefix. Leave it empty to list the top level.">
           <div className="row row-tight">
-            <input
+            <LongField
               className="grow"
               value={path}
               spellCheck={false}
               aria-label="Key or prefix"
               placeholder="user:  or  session:42"
-              onChange={(e) => setPath(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && go()}
+              onChange={setPath}
+              onEnter={() => go()}
             />
             <button className="btn-primary" onClick={go} title="Open this exact key, or browse it as a prefix">
               Scan
@@ -499,7 +501,7 @@ export default function RedisPanel() {
                       <span className="tbadge" style={{ background: `color-mix(in srgb, ${color} 18%, transparent)`, color }}>
                         {badge}
                       </span>
-                      <span className="kname">{ch.seg}</span>
+                      <span className="kname" title={ch.full}>{ch.seg}</span>
                       <span className="kcount">
                         {ch.count}
                         {ch.hasChildren ? ' ›' : ''}
@@ -597,13 +599,13 @@ export default function RedisPanel() {
           <Section flush title="Publish" hint="Pub/Sub is independent of keys. Send a message to a channel, or listen below.">
             <div className="row">
               <input className="w-md" placeholder="channel" aria-label="Channel" value={channel} onChange={(e) => setChannel(e.target.value)} />
-              <input
+              <LongField
                 className="grow"
                 placeholder='{"event":"ping"}'
                 aria-label="Message"
                 value={pubMsg}
                 spellCheck={false}
-                onChange={(e) => setPubMsg(e.target.value)}
+                onChange={setPubMsg}
               />
               <button className="btn-secondary" onClick={publish} title="Publish this message to the channel">
                 Publish
@@ -620,13 +622,13 @@ export default function RedisPanel() {
             }
           >
             <div className="row">
-              <input
+              <LongField
                 className="grow"
                 placeholder="channel1, channel2"
                 aria-label="Channels"
                 value={subChannels}
                 disabled={subscribed}
-                onChange={(e) => setSubChannels(e.target.value)}
+                onChange={setSubChannels}
               />
               <button
                 className={subscribed ? 'btn-secondary btn-on' : 'btn-primary'}
@@ -751,12 +753,13 @@ function InfoTab({ url }: { url: string }) {
 
       <Section title="Export keys" hint="Downloads a JSON file of keys matching the pattern, up to 2000 keys.">
         <div className="row">
-          <input
+          <LongField
             className="grow"
             value={exportMatch}
             spellCheck={false}
+            aria-label="Export pattern"
             placeholder="myprefix:*"
-            onChange={(e) => setExportMatch(e.target.value)}
+            onChange={setExportMatch}
           />
           <button
             className="btn-secondary"
@@ -831,11 +834,12 @@ function CommandsTab({
       </div>
 
       <label className="field-first">Target key</label>
-      <input
+      <LongField
         value={key}
         spellCheck={false}
+        aria-label="Target key"
         placeholder="myprefix:sub:key"
-        onChange={(e) => setKey(e.target.value)}
+        onChange={setKey}
       />
       <div className="hint">
         Fills <code>{'{k}'}</code> in the templates. Opening a key on the left sets it.
@@ -1117,7 +1121,7 @@ function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, un
   if (type === 'string')
     return (
       <div className="row addrow">
-        <input className="grow" placeholder="new value" value={a} onChange={(e) => setA(e.target.value)} />
+        <LongField className="grow" placeholder="new value" value={a} onChange={setA} />
         <button className="btn-secondary" onClick={() => onAdd({ value: a })} title="Overwrite the string value">set</button>
       </div>
     );
@@ -1125,7 +1129,7 @@ function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, un
     return (
       <div className="row addrow">
         <input className="w-md" placeholder="field" value={a} onChange={(e) => setA(e.target.value)} />
-        <input className="grow" placeholder="value" value={b} onChange={(e) => setB(e.target.value)} />
+        <LongField className="grow" placeholder="value" value={b} onChange={setB} />
         <button className="btn-secondary" onClick={() => onAdd({ field: a, value: b })} title="Set this field on the hash">
           hset
         </button>
@@ -1135,7 +1139,7 @@ function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, un
     return (
       <div className="row addrow">
         <input className="w-sm" placeholder="score" value={a} onChange={(e) => setA(e.target.value)} />
-        <input className="grow" placeholder="member" value={b} onChange={(e) => setB(e.target.value)} />
+        <LongField className="grow" placeholder="member" value={b} onChange={setB} />
         <button className="btn-secondary" onClick={() => onAdd({ score: a, member: b })} title="Add this member with the given score">
           zadd
         </button>
@@ -1144,14 +1148,14 @@ function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, un
   if (type === 'set')
     return (
       <div className="row addrow">
-        <input className="grow" placeholder="member" value={a} onChange={(e) => setA(e.target.value)} />
+        <LongField className="grow" placeholder="member" value={a} onChange={setA} />
         <button className="btn-secondary" onClick={() => onAdd({ member: a })} title="Add this member to the set">sadd</button>
       </div>
     );
   if (type === 'list')
     return (
       <div className="row addrow">
-        <input className="grow" placeholder="value" value={a} onChange={(e) => setA(e.target.value)} />
+        <LongField className="grow" placeholder="value" value={a} onChange={setA} />
         <button className="btn-secondary" onClick={() => onAdd({ value: a, left: false })} title="Append to the tail of the list">
           rpush
         </button>
