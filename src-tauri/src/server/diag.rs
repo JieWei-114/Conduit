@@ -41,19 +41,39 @@ async fn tcp(Json(req): Json<TcpReq>) -> Json<Value> {
     }
     let addr = host_port(host, port);
     let t0 = Instant::now();
-    let att = Attempt::start("TCP", &format!("tcp://{addr}"), HashMap::new(), Value::Null, 0);
-    match timeout(Duration::from_millis(TCP_TIMEOUT_MS), TcpStream::connect(&addr)).await {
+    let att = Attempt::start(
+        "TCP",
+        &format!("tcp://{addr}"),
+        HashMap::new(),
+        Value::Null,
+        0,
+    );
+    match timeout(
+        Duration::from_millis(TCP_TIMEOUT_MS),
+        TcpStream::connect(&addr),
+    )
+    .await
+    {
         Ok(Ok(_)) => Json(json!({ "ok": true, "open": true, "ms": t0.elapsed().as_millis() })),
         Ok(Err(e)) => {
             let (detail, log) = att.failed("connect", &e, false, TCP_TIMEOUT_MS).await;
-            Json(json!({ "ok": true, "open": false, "ms": att.elapsed_ms(), "error": attempt::describe(&e), "detail": detail, "log": log }))
+            Json(
+                json!({ "ok": true, "open": false, "ms": att.elapsed_ms(), "error": attempt::describe(&e), "detail": detail, "log": log }),
+            )
         }
         Err(_) => {
             let ms = t0.elapsed().as_millis();
             let (detail, log) = att
-                .failed_with("timeout", vec![format!("no TCP connection within {TCP_TIMEOUT_MS} ms")], true, TCP_TIMEOUT_MS)
+                .failed_with(
+                    "timeout",
+                    vec![format!("no TCP connection within {TCP_TIMEOUT_MS} ms")],
+                    true,
+                    TCP_TIMEOUT_MS,
+                )
                 .await;
-            Json(json!({ "ok": true, "open": false, "ms": ms, "error": "timeout", "detail": detail, "log": log }))
+            Json(
+                json!({ "ok": true, "open": false, "ms": ms, "error": "timeout", "detail": detail, "log": log }),
+            )
         }
     }
 }
@@ -84,7 +104,12 @@ async fn tls(Json(req): Json<TlsReq>) -> Json<Value> {
     let t0 = Instant::now();
     let target = format!("https://{}", host_port(&host, port));
     let att = Attempt::start("TLS", &target, HashMap::new(), Value::Null, 0);
-    match timeout(Duration::from_millis(TLS_TIMEOUT_MS), tls_probe(host.clone(), port)).await {
+    match timeout(
+        Duration::from_millis(TLS_TIMEOUT_MS),
+        tls_probe(host.clone(), port),
+    )
+    .await
+    {
         Ok(Ok(mut v)) => {
             v["ms"] = json!(t0.elapsed().as_millis());
             Json(v)
@@ -92,13 +117,22 @@ async fn tls(Json(req): Json<TlsReq>) -> Json<Value> {
         Ok(Err((stage, chain))) => {
             let message = chain.join(": ");
             let (detail, log) = att.failed_with(stage, chain, false, TLS_TIMEOUT_MS).await;
-            Json(json!({ "ok": false, "stage": stage, "error": message, "detail": detail, "log": log, "ms": att.elapsed_ms() }))
+            Json(
+                json!({ "ok": false, "stage": stage, "error": message, "detail": detail, "log": log, "ms": att.elapsed_ms() }),
+            )
         }
         Err(_) => {
             let (detail, log) = att
-                .failed_with("timeout", vec![format!("no TLS handshake within {TLS_TIMEOUT_MS} ms")], true, TLS_TIMEOUT_MS)
+                .failed_with(
+                    "timeout",
+                    vec![format!("no TLS handshake within {TLS_TIMEOUT_MS} ms")],
+                    true,
+                    TLS_TIMEOUT_MS,
+                )
                 .await;
-            Json(json!({ "ok": false, "stage": "timeout", "error": "timeout", "detail": detail, "log": log, "ms": att.elapsed_ms() }))
+            Json(
+                json!({ "ok": false, "stage": "timeout", "error": "timeout", "detail": detail, "log": log, "ms": att.elapsed_ms() }),
+            )
         }
     }
 }
@@ -152,8 +186,8 @@ async fn tls_probe(host: String, port: u16) -> Result<Value, TlsFailure> {
     // Verified against the Mozilla root list bundled in conduit (webpki-roots), not the OS store.
     let (authorized, auth_error) = verify_chain(&roots, certs, &bare);
 
-    let mut v = parse_cert(leaf.as_ref(), authorized, auth_error)
-        .map_err(|e| ("certificate", vec![e]))?;
+    let mut v =
+        parse_cert(leaf.as_ref(), authorized, auth_error).map_err(|e| ("certificate", vec![e]))?;
     v["tcpMs"] = json!(tcp_ms);
     v["handshakeMs"] = json!(handshake_ms);
     v["protocol"] = json!(protocol);
@@ -169,8 +203,8 @@ fn verify_chain(
 ) -> (bool, String) {
     use tokio_rustls::rustls::client::verify_server_cert_signed_by_trust_anchor;
     use tokio_rustls::rustls::client::verify_server_name;
-    use tokio_rustls::rustls::server::ParsedCertificate;
     use tokio_rustls::rustls::pki_types::{ServerName, UnixTime};
+    use tokio_rustls::rustls::server::ParsedCertificate;
 
     let leaf = match ParsedCertificate::try_from(&certs[0]) {
         Ok(p) => p,
@@ -180,8 +214,7 @@ fn verify_chain(
     let algs = rustls::crypto::ring::default_provider()
         .signature_verification_algorithms
         .all;
-    if let Err(e) =
-        verify_server_cert_signed_by_trust_anchor(&leaf, roots, &certs[1..], now, algs)
+    if let Err(e) = verify_server_cert_signed_by_trust_anchor(&leaf, roots, &certs[1..], now, algs)
     {
         return (false, super::attempt::describe(&e));
     }
@@ -249,7 +282,8 @@ fn parse_cert(der: &[u8], authorized: bool, auth_error: String) -> Result<Value,
 }
 
 fn iso(secs: i64) -> Option<String> {
-    chrono::DateTime::from_timestamp(secs, 0).map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 #[derive(Debug)]
@@ -273,8 +307,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAll {
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
-    {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -283,8 +319,10 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAll {
         _message: &[u8],
         _cert: &tokio_rustls::rustls::pki_types::CertificateDer<'_>,
         _dss: &tokio_rustls::rustls::DigitallySignedStruct,
-    ) -> Result<tokio_rustls::rustls::client::danger::HandshakeSignatureValid, tokio_rustls::rustls::Error>
-    {
+    ) -> Result<
+        tokio_rustls::rustls::client::danger::HandshakeSignatureValid,
+        tokio_rustls::rustls::Error,
+    > {
         Ok(tokio_rustls::rustls::client::danger::HandshakeSignatureValid::assertion())
     }
 
@@ -325,17 +363,29 @@ async fn dns(Json(req): Json<DnsReq>) -> Json<Value> {
         ),
     };
 
-    let att = Attempt::start("DNS", &format!("dns://{host}"), HashMap::new(), Value::Null, 0);
+    let att = Attempt::start(
+        "DNS",
+        &format!("dns://{host}"),
+        HashMap::new(),
+        Value::Null,
+        0,
+    );
     let fqdn = absolute(&host);
     // every record type and this machine's own lookup at once: a slow or failing server costs
     // one timeout, not one per type
     let (a, aaaa, cname, mx, os) = tokio::join!(
         resolver.ipv4_lookup(fqdn.as_str()),
         resolver.ipv6_lookup(fqdn.as_str()),
-        resolver.lookup(fqdn.as_str(), hickory_resolver::proto::rr::RecordType::CNAME),
+        resolver.lookup(
+            fqdn.as_str(),
+            hickory_resolver::proto::rr::RecordType::CNAME
+        ),
         resolver.mx_lookup(fqdn.as_str()),
         // what programs on this machine get (hosts file, VPN split DNS, mDNS included)
-        timeout(Duration::from_secs(5), tokio::net::lookup_host((host.as_str(), 0))),
+        timeout(
+            Duration::from_secs(5),
+            tokio::net::lookup_host((host.as_str(), 0))
+        ),
     );
 
     let mut errors: HashMap<&str, Value> = HashMap::new();
@@ -350,11 +400,21 @@ async fn dns(Json(req): Json<DnsReq>) -> Json<Value> {
             vec![]
         }
     };
-    let a = take("A", a.map(|r| r.iter().map(|ip| json!(ip.to_string())).collect()));
-    let aaaa = take("AAAA", aaaa.map(|r| r.iter().map(|ip| json!(ip.to_string())).collect()));
+    let a = take(
+        "A",
+        a.map(|r| r.iter().map(|ip| json!(ip.to_string())).collect()),
+    );
+    let aaaa = take(
+        "AAAA",
+        aaaa.map(|r| r.iter().map(|ip| json!(ip.to_string())).collect()),
+    );
     let cname = take(
         "CNAME",
-        cname.map(|r| r.iter().filter_map(|d| d.as_cname().map(|c| json!(c.to_utf8()))).collect()),
+        cname.map(|r| {
+            r.iter()
+                .filter_map(|d| d.as_cname().map(|c| json!(c.to_utf8())))
+                .collect()
+        }),
     );
     let mx = take(
         "MX",
@@ -365,7 +425,9 @@ async fn dns(Json(req): Json<DnsReq>) -> Json<Value> {
         }),
     );
     let os = match os {
-        Ok(Ok(addrs)) => json!({ "ok": true, "addresses": unique_ips(addrs.map(|a| a.ip().to_string())) }),
+        Ok(Ok(addrs)) => {
+            json!({ "ok": true, "addresses": unique_ips(addrs.map(|a| a.ip().to_string())) })
+        }
         Ok(Err(e)) => json!({ "ok": false, "error": attempt::describe(&e) }),
         Err(_) => json!({ "ok": false, "error": "no answer within 5 s" }),
     };
@@ -421,13 +483,22 @@ fn dns_chain(errors: &HashMap<&str, Value>, os: &Value) -> Vec<String> {
     let mut lines: Vec<(Vec<&str>, String)> = Vec::new();
     for t in ["A", "AAAA", "CNAME"] {
         let Some(e) = errors.get(t) else { continue };
-        let said = format!("{} {}", e["code"].as_str().unwrap_or(""), e["message"].as_str().unwrap_or("")).trim().to_string();
+        let said = format!(
+            "{} {}",
+            e["code"].as_str().unwrap_or(""),
+            e["message"].as_str().unwrap_or("")
+        )
+        .trim()
+        .to_string();
         match lines.iter_mut().find(|(_, s)| *s == said) {
             Some((types, _)) => types.push(t),
             None => lines.push((vec![t], said)),
         }
     }
-    let mut out: Vec<String> = lines.into_iter().map(|(types, said)| format!("{}: {said}", types.join(", "))).collect();
+    let mut out: Vec<String> = lines
+        .into_iter()
+        .map(|(types, said)| format!("{}: {said}", types.join(", ")))
+        .collect();
     if let Some(e) = os["error"].as_str() {
         out.push(format!("this machine's resolver: {e}"));
     }
@@ -465,7 +536,11 @@ fn lookup_error(e: &ResolveError) -> Value {
     };
     let message = match e.kind() {
         ResolveErrorKind::NoRecordsFound { query, .. } => {
-            format!("no {} record for {}", query.query_type(), query.name().to_utf8().trim_end_matches('.'))
+            format!(
+                "no {} record for {}",
+                query.query_type(),
+                query.name().to_utf8().trim_end_matches('.')
+            )
         }
         _ => attempt::describe(e),
     };
@@ -482,7 +557,9 @@ fn dns_verdict(any_record: bool, os_ok: bool, errors: &HashMap<&str, Value>) -> 
     let code = |t: &str| errors.get(t).and_then(|e| e["code"].as_str()).unwrap_or("");
     let msg = match (code("A"), code("AAAA")) {
         ("NXDOMAIN", _) | (_, "NXDOMAIN") => "NXDOMAIN: no such name".to_string(),
-        ("NODATA", "NODATA") => "NODATA: the name exists but has no A, AAAA or CNAME record".to_string(),
+        ("NODATA", "NODATA") => {
+            "NODATA: the name exists but has no A, AAAA or CNAME record".to_string()
+        }
         _ => errors
             .get("A")
             .or_else(|| errors.get("AAAA"))
@@ -525,10 +602,21 @@ async fn ping(Json(req): Json<PingReq>) -> Json<Value> {
             let headers: HashMap<String, String> = r
                 .headers()
                 .iter()
-                .map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
+                .map(|(k, v)| {
+                    (
+                        k.to_string(),
+                        String::from_utf8_lossy(v.as_bytes()).to_string(),
+                    )
+                })
                 .collect();
             // the body is not read: the status is the health result
-            let log = att.succeeded(Reply { status, headers: &headers, trailers: None, body: Value::Null, bytes: 0 });
+            let log = att.succeeded(Reply {
+                status,
+                headers: &headers,
+                trailers: None,
+                body: Value::Null,
+                bytes: 0,
+            });
             Json(json!({
                 "ok": true,
                 "status": status,
@@ -547,7 +635,9 @@ async fn ping(Json(req): Json<PingReq>) -> Json<Value> {
             } else {
                 attempt::describe(&e)
             };
-            Json(json!({ "ok": false, "error": msg, "ms": att.elapsed_ms(), "detail": detail, "log": log }))
+            Json(
+                json!({ "ok": false, "error": msg, "ms": att.elapsed_ms(), "detail": detail, "log": log }),
+            )
         }
     }
 }
@@ -587,7 +677,10 @@ mod tests {
     fn a_missing_name_fails_with_its_code() {
         let mut errors = HashMap::new();
         errors.insert("A", json!({ "code": "NXDOMAIN", "message": "no record" }));
-        errors.insert("AAAA", json!({ "code": "NXDOMAIN", "message": "no record" }));
+        errors.insert(
+            "AAAA",
+            json!({ "code": "NXDOMAIN", "message": "no record" }),
+        );
         let (ok, err) = dns_verdict(false, false, &errors);
         assert!(!ok);
         assert!(err.as_str().unwrap().starts_with("NXDOMAIN"), "{err}");
@@ -595,27 +688,60 @@ mod tests {
         let mut nodata = HashMap::new();
         nodata.insert("A", json!({ "code": "NODATA", "message": "" }));
         nodata.insert("AAAA", json!({ "code": "NODATA", "message": "" }));
-        assert!(dns_verdict(false, false, &nodata).1.as_str().unwrap().starts_with("NODATA"));
+        assert!(dns_verdict(false, false, &nodata)
+            .1
+            .as_str()
+            .unwrap()
+            .starts_with("NODATA"));
 
         let mut other = HashMap::new();
-        other.insert("A", json!({ "code": "TIMEOUT", "message": "request timed out" }));
-        assert_eq!(dns_verdict(false, false, &other).1, json!("request timed out"));
+        other.insert(
+            "A",
+            json!({ "code": "TIMEOUT", "message": "request timed out" }),
+        );
+        assert_eq!(
+            dns_verdict(false, false, &other).1,
+            json!("request timed out")
+        );
     }
 
     #[test]
     fn repeated_addresses_are_dropped_even_when_apart() {
-        let ips = ["10.0.0.2", "::1", "10.0.0.2", "::1"].iter().map(|s| s.to_string());
-        assert_eq!(unique_ips(ips), vec!["10.0.0.2".to_string(), "::1".to_string()]);
+        let ips = ["10.0.0.2", "::1", "10.0.0.2", "::1"]
+            .iter()
+            .map(|s| s.to_string());
+        assert_eq!(
+            unique_ips(ips),
+            vec!["10.0.0.2".to_string(), "::1".to_string()]
+        );
     }
 
     #[test]
     fn a_dns_failure_names_each_lookup_and_what_to_try() {
         let mut errors = HashMap::new();
-        errors.insert("A", json!({ "code": "NXDOMAIN", "message": "no record found" }));
-        errors.insert("MX", json!({ "code": "NXDOMAIN", "message": "no record found" }));
-        errors.insert("AAAA", json!({ "code": "NXDOMAIN", "message": "no record found" }));
-        let chain = dns_chain(&errors, &json!({ "ok": false, "error": "nodename nor servname provided" }));
-        assert_eq!(chain, vec!["A, AAAA: NXDOMAIN no record found".to_string(), "this machine's resolver: nodename nor servname provided".to_string()]);
+        errors.insert(
+            "A",
+            json!({ "code": "NXDOMAIN", "message": "no record found" }),
+        );
+        errors.insert(
+            "MX",
+            json!({ "code": "NXDOMAIN", "message": "no record found" }),
+        );
+        errors.insert(
+            "AAAA",
+            json!({ "code": "NXDOMAIN", "message": "no record found" }),
+        );
+        let chain = dns_chain(
+            &errors,
+            &json!({ "ok": false, "error": "nodename nor servname provided" }),
+        );
+        assert_eq!(
+            chain,
+            vec![
+                "A, AAAA: NXDOMAIN no record found".to_string(),
+                "this machine's resolver: nodename nor servname provided".to_string()
+            ]
+        );
         assert!(dns_advice(&errors).starts_with("No such name"));
         assert!(dns_advice(&HashMap::new()).contains("bare hostname"));
     }
@@ -635,9 +761,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_ping_keeps_no_query_secret_in_its_record() {
-        let Json(out) = ping(Json(PingReq { url: Some("http://127.0.0.1:9/h?token=s3cret".into()) })).await;
+        let Json(out) = ping(Json(PingReq {
+            url: Some("http://127.0.0.1:9/h?token=s3cret".into()),
+        }))
+        .await;
         assert_eq!(out["ok"], false);
-        assert!(!out["error"].to_string().contains("s3cret") && !out["detail"]["chain"].to_string().contains("s3cret"), "{out}");
+        assert!(
+            !out["error"].to_string().contains("s3cret")
+                && !out["detail"]["chain"].to_string().contains("s3cret"),
+            "{out}"
+        );
     }
 
     #[test]

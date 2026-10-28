@@ -44,7 +44,13 @@ async fn conn(raw: &str) -> Result<Conn, Failure> {
 /// the password masked.
 fn begin(url: &str, what: &str, args: Value) -> Attempt {
     let bytes = args.to_string().len();
-    Attempt::start(what, &redact_url(&normalize(url)), HashMap::new(), args, bytes)
+    Attempt::start(
+        what,
+        &redact_url(&normalize(url)),
+        HashMap::new(),
+        args,
+        bytes,
+    )
 }
 
 /// A success: `body` with `ok`, the time taken and the record, whose response is `reply`.
@@ -124,7 +130,10 @@ fn reply_hints(chain: &[String]) -> Vec<String> {
         out.push("The password (or user) was not accepted.".into());
     }
     if has("WRONGTYPE") {
-        out.push("The key holds a different type of value than this command works on: TYPE shows which.".into());
+        out.push(
+            "The key holds a different type of value than this command works on: TYPE shows which."
+                .into(),
+        );
     }
     if has("unknown command") {
         out.push("This server does not know the command: a newer command on an older server, or one disabled or renamed in its config.".into());
@@ -273,7 +282,10 @@ struct ScanReq {
 
 async fn scan(Json(b): Json<ScanReq>) -> Json<Value> {
     let url = b.url.unwrap_or_default();
-    let pat = b.r#match.filter(|s| !s.is_empty()).unwrap_or_else(|| "*".into());
+    let pat = b
+        .r#match
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "*".into());
     let cursor = b.cursor.unwrap_or_else(|| "0".into());
     let a = begin(&url, "SCAN", json!({ "match": pat, "cursor": cursor }));
     let mut c = match conn(&url).await {
@@ -291,10 +303,18 @@ async fn scan(Json(b): Json<ScanReq>) -> Json<Value> {
         } else {
             vec![json!({ "key": pat, "type": t })]
         };
-        return done(&a, json!({ "keys": keys.len() }), json!({ "cursor": "0", "keys": keys }));
+        return done(
+            &a,
+            json!({ "keys": keys.len() }),
+            json!({ "cursor": "0", "keys": keys }),
+        );
     }
 
-    let limits = ScanLimits { count: 300, want: 200, max_calls: 60 };
+    let limits = ScanLimits {
+        count: 300,
+        want: 200,
+        max_calls: 60,
+    };
     let (cur, found) = match redis_conn::scan(&mut c, &pat, &cursor, &limits).await {
         Ok(page) => (page.cursor, page.keys),
         Err(f) => return fail(&a, f).await,
@@ -456,7 +476,11 @@ async fn get_key(Json(b): Json<GetReq>) -> Json<Value> {
     };
     if ty == "none" {
         // not an error: the caller may browse it as a prefix instead
-        let mut out = done(&a, json!("none"), json!({ "missing": true, "error": "key does not exist" }));
+        let mut out = done(
+            &a,
+            json!("none"),
+            json!({ "missing": true, "error": "key does not exist" }),
+        );
         out.0["ok"] = json!(false);
         return out;
     }
@@ -551,10 +575,10 @@ async fn set(Json(b): Json<SetReq>) -> Json<Value> {
         return fail(&a, f).await;
     }
 
-    let ttl = b
-        .ttl
-        .as_ref()
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())));
+    let ttl = b.ttl.as_ref().and_then(|v| {
+        v.as_i64()
+            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+    });
     if let Some(t) = ttl {
         if t > 0 {
             if let Err(e) = c.expire::<_, i64>(&key, t).await {
@@ -603,7 +627,11 @@ async fn del(Json(b): Json<DelReq>) -> Json<Value> {
             }
             // a stream entry goes by its id
             (Some(id), Some("stream")) => {
-                redis::cmd("XDEL").arg(&key).arg(id).query_async(&mut c).await?
+                redis::cmd("XDEL")
+                    .arg(&key)
+                    .arg(id)
+                    .query_async(&mut c)
+                    .await?
             }
             _ => c.del(&key).await?,
         })
@@ -632,7 +660,9 @@ async fn expire(Json(b): Json<ExpireReq>) -> Json<Value> {
         Ok(t) => t,
         Err(why) => {
             let (error, log) = a.not_sent("request", why);
-            return Json(json!({ "ok": false, "stage": "request", "error": why, "detail": error, "durationMs": 0, "log": log }));
+            return Json(
+                json!({ "ok": false, "stage": "request", "error": why, "detail": error, "durationMs": 0, "log": log }),
+            );
         }
     };
     let mut c = match conn(&url).await {
@@ -640,9 +670,16 @@ async fn expire(Json(b): Json<ExpireReq>) -> Json<Value> {
         Err(f) => return fail(&a, f).await,
     };
     let res = if ttl < 0 {
-        redis::cmd("PERSIST").arg(&key).query_async::<i64>(&mut c).await
+        redis::cmd("PERSIST")
+            .arg(&key)
+            .query_async::<i64>(&mut c)
+            .await
     } else {
-        redis::cmd("EXPIRE").arg(&key).arg(ttl).query_async::<i64>(&mut c).await
+        redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(ttl)
+            .query_async::<i64>(&mut c)
+            .await
     };
     match res {
         // 0: no such key, or (PERSIST) a key that had no expiry
@@ -656,7 +693,10 @@ async fn expire(Json(b): Json<ExpireReq>) -> Json<Value> {
 /// typo must not do that.
 fn parse_ttl(v: Option<&Value>) -> Result<i64, &'static str> {
     let n = v
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+        })
         .ok_or("TTL must be a whole number of seconds (or -1 to remove the expiry)")?;
     match n {
         0 => Err("A TTL of 0 would delete the key; use Delete to remove it"),
@@ -707,15 +747,26 @@ struct ChildrenReq {
 async fn children(Json(b): Json<ChildrenReq>) -> Json<Value> {
     let url = b.url.unwrap_or_default();
     let prefix = b.prefix.unwrap_or_default();
-    let sep = b.sep.filter(|s| !s.is_empty()).unwrap_or_else(|| ":".into());
-    let a = begin(&url, "SCAN (by prefix)", json!({ "prefix": prefix, "sep": sep }));
+    let sep = b
+        .sep
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| ":".into());
+    let a = begin(
+        &url,
+        "SCAN (by prefix)",
+        json!({ "prefix": prefix, "sep": sep }),
+    );
     let mut c = match conn(&url).await {
         Ok(c) => c,
         Err(f) => return fail(&a, f).await,
     };
 
     let pat = format!("{}*", prefix);
-    let limits = ScanLimits { count: 1000, want: 5000, max_calls: 60 };
+    let limits = ScanLimits {
+        count: 1000,
+        want: 5000,
+        max_calls: 60,
+    };
     let (keys, complete) = match redis_conn::scan(&mut c, &pat, "0", &limits).await {
         Ok(page) => (page.keys, page.cursor == "0"),
         Err(f) => return fail(&a, f).await,
@@ -776,7 +827,10 @@ async fn children(Json(b): Json<ChildrenReq>) -> Json<Value> {
                 "full": full,
             });
             if e.is_key {
-                put_type(&mut obj, type_of.remove(&full).unwrap_or_else(|| Ok("none".into())));
+                put_type(
+                    &mut obj,
+                    type_of.remove(&full).unwrap_or_else(|| Ok("none".into())),
+                );
             }
             obj
         })
@@ -834,7 +888,11 @@ async fn info(Json(b): Json<InfoReq>) -> Json<Value> {
             }
         }
     }
-    done(&a, json!(raw), json!({ "sections": Value::Object(sections) }))
+    done(
+        &a,
+        json!(raw),
+        json!({ "sections": Value::Object(sections) }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -879,11 +937,17 @@ async fn export_key(c: &mut Conn, key: &str) -> (Value, Option<String>) {
 
 async fn export(Json(b): Json<ExportReq>) -> Json<Value> {
     let url = b.url.unwrap_or_default();
-    let pat = b.r#match.filter(|s| !s.is_empty()).unwrap_or_else(|| "*".into());
+    let pat = b
+        .r#match
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "*".into());
     let limit = b
         .limit
         .as_ref()
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .filter(|n| *n > 0)
         .unwrap_or(1000);
     let cap = limit.min(5000) as usize;
@@ -893,7 +957,11 @@ async fn export(Json(b): Json<ExportReq>) -> Json<Value> {
         Err(f) => return fail(&a, f).await,
     };
 
-    let limits = ScanLimits { count: 500, want: cap, max_calls: 100 };
+    let limits = ScanLimits {
+        count: 500,
+        want: cap,
+        max_calls: 100,
+    };
     let (cur, keys) = match redis_conn::scan(&mut c, &pat, "0", &limits).await {
         Ok(page) => (page.cursor, page.keys),
         Err(f) => return fail(&a, f).await,
@@ -932,7 +1000,10 @@ struct CmdBatchReq {
 async fn cmd_batch(Json(b): Json<CmdBatchReq>) -> Json<Value> {
     let url = b.url.unwrap_or_default();
     let argvs = b.argvs.unwrap_or_default();
-    let logged: Vec<Vec<String>> = argvs.iter().map(|argv| logged_args(&arg_strings(argv))).collect();
+    let logged: Vec<Vec<String>> = argvs
+        .iter()
+        .map(|argv| logged_args(&arg_strings(argv)))
+        .collect();
     let a = begin(&url, "BATCH", json!(logged));
     if argvs.is_empty() {
         return fail(&a, Failure::Invalid(vec!["no commands".into()])).await;
@@ -979,7 +1050,11 @@ async fn publish(Json(b): Json<PublishReq>) -> Json<Value> {
     let url = b.url.unwrap_or_default();
     let channel = b.channel.unwrap_or_default();
     let message = b.message.unwrap_or_default();
-    let a = begin(&url, "PUBLISH", json!({ "channel": channel, "message": message }));
+    let a = begin(
+        &url,
+        "PUBLISH",
+        json!({ "channel": channel, "message": message }),
+    );
     let mut c = match conn(&url).await {
         Ok(c) => c,
         Err(f) => return fail(&a, f).await,
@@ -1005,8 +1080,16 @@ fn payload_view(bytes: &[u8]) -> Value {
     match std::str::from_utf8(bytes) {
         Ok(s) => json!({ "message": s, "encoding": "utf8" }),
         Err(_) => {
-            let hex: Vec<String> = bytes.iter().take(HEX_PREVIEW).map(|x| format!("{x:02x}")).collect();
-            let more = if bytes.len() > HEX_PREVIEW { " …" } else { "" };
+            let hex: Vec<String> = bytes
+                .iter()
+                .take(HEX_PREVIEW)
+                .map(|x| format!("{x:02x}"))
+                .collect();
+            let more = if bytes.len() > HEX_PREVIEW {
+                " …"
+            } else {
+                ""
+            };
             json!({
                 "message": base64::engine::general_purpose::STANDARD.encode(bytes),
                 "encoding": "base64",
@@ -1076,7 +1159,11 @@ fn logged_args(args: &[String]) -> Vec<String> {
         }
         "ACL" if upper.get(1).map(String::as_str) == Some("SETUSER") => {
             for a in out.iter_mut().skip(3) {
-                if a.starts_with('>') || a.starts_with('<') || a.starts_with('#') || a.starts_with('!') {
+                if a.starts_with('>')
+                    || a.starts_with('<')
+                    || a.starts_with('#')
+                    || a.starts_with('!')
+                {
                     *a = format!("{}{MASK}", &a[..1]);
                 }
             }
@@ -1152,7 +1239,8 @@ async fn subscribe(
         });
         if forward(messages, &tx).await {
             // the server side ended: say so instead of leaving a silent feed
-            let ended = Failure::Network(vec!["the server closed the subscription connection".into()]);
+            let ended =
+                Failure::Network(vec!["the server closed the subscription connection".into()]);
             let _ = tx.send(error_event(&a, ended).await).await;
         }
     });
@@ -1169,7 +1257,14 @@ mod tests {
         assert_eq!(parse_ttl(Some(&json!(60))), Ok(60));
         assert_eq!(parse_ttl(Some(&json!("120"))), Ok(120));
         assert_eq!(parse_ttl(Some(&json!(-1))), Ok(-1));
-        for bad in [json!("1h"), json!(null), json!(1.5), json!(0), json!("0"), json!(-5)] {
+        for bad in [
+            json!("1h"),
+            json!(null),
+            json!(1.5),
+            json!(0),
+            json!("0"),
+            json!(-5),
+        ] {
             assert!(parse_ttl(Some(&bad)).is_err(), "{bad}");
         }
         assert!(parse_ttl(None).is_err());
@@ -1213,7 +1308,9 @@ mod tests {
     fn reply_errors_name_the_usual_causes() {
         let h = reply_hints(&["NOAUTH Authentication required.".into()]);
         assert!(h.iter().any(|s| s.contains("password")), "{h:?}");
-        let h = reply_hints(&["WRONGTYPE Operation against a key holding the wrong kind of value".into()]);
+        let h = reply_hints(&[
+            "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+        ]);
         assert!(h.iter().any(|s| s.contains("TYPE")), "{h:?}");
         assert!(reply_hints(&["ERR syntax error".into()]).is_empty());
         let e = reply_error(&["TTL".into(), "ERR boom".into()]);
@@ -1230,7 +1327,10 @@ mod tests {
         assert_eq!(v["encoding"], "base64");
         assert_eq!(v["message"], "/wAQ");
         let note = v["note"].as_str().unwrap();
-        assert!(note.contains("3 bytes") && note.contains("ff 00 10"), "{note}");
+        assert!(
+            note.contains("3 bytes") && note.contains("ff 00 10"),
+            "{note}"
+        );
     }
 
     #[test]
@@ -1257,11 +1357,44 @@ mod tests {
         let a = |s: &[&str]| logged_args(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
         assert_eq!(a(&["auth", "pw"]), vec!["auth", "•••"]);
         assert_eq!(a(&["AUTH", "user", "pw"]), vec!["AUTH", "user", "•••"]);
-        assert_eq!(a(&["HELLO", "3", "AUTH", "user", "pw", "SETNAME", "x"]), vec!["HELLO", "3", "AUTH", "user", "•••", "SETNAME", "x"]);
-        assert_eq!(a(&["CONFIG", "SET", "maxmemory", "1mb", "requirepass", "pw", "masterauth", "pw2"]), vec!["CONFIG", "SET", "maxmemory", "1mb", "requirepass", "•••", "masterauth", "•••"]);
-        assert_eq!(a(&["MIGRATE", "h", "6379", "k", "0", "1000", "AUTH", "pw"])[7], "•••");
-        assert_eq!(a(&["MIGRATE", "h", "6379", "k", "0", "1000", "AUTH2", "u", "pw"])[8], "•••");
-        assert_eq!(a(&["ACL", "SETUSER", "bob", "on", ">pw", "~*"]), vec!["ACL", "SETUSER", "bob", "on", ">•••", "~*"]);
+        assert_eq!(
+            a(&["HELLO", "3", "AUTH", "user", "pw", "SETNAME", "x"]),
+            vec!["HELLO", "3", "AUTH", "user", "•••", "SETNAME", "x"]
+        );
+        assert_eq!(
+            a(&[
+                "CONFIG",
+                "SET",
+                "maxmemory",
+                "1mb",
+                "requirepass",
+                "pw",
+                "masterauth",
+                "pw2"
+            ]),
+            vec![
+                "CONFIG",
+                "SET",
+                "maxmemory",
+                "1mb",
+                "requirepass",
+                "•••",
+                "masterauth",
+                "•••"
+            ]
+        );
+        assert_eq!(
+            a(&["MIGRATE", "h", "6379", "k", "0", "1000", "AUTH", "pw"])[7],
+            "•••"
+        );
+        assert_eq!(
+            a(&["MIGRATE", "h", "6379", "k", "0", "1000", "AUTH2", "u", "pw"])[8],
+            "•••"
+        );
+        assert_eq!(
+            a(&["ACL", "SETUSER", "bob", "on", ">pw", "~*"]),
+            vec!["ACL", "SETUSER", "bob", "on", ">•••", "~*"]
+        );
         assert_eq!(a(&["GET", "auth"]), vec!["GET", "auth"]);
     }
 

@@ -30,7 +30,10 @@ fn flush_webview(w: &WebviewWindow) {
 fn close_after_flush(app: &AppHandle, label: &str) {
     {
         let mut closing = CLOSING.lock().unwrap_or_else(|e| e.into_inner());
-        if !closing.get_or_insert_with(HashSet::new).insert(label.to_string()) {
+        if !closing
+            .get_or_insert_with(HashSet::new)
+            .insert(label.to_string())
+        {
             return;
         }
     }
@@ -71,7 +74,13 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
             app_menu.remove(&quit)?;
         }
         let label = format!("Quit {}", handle.package_info().name);
-        app_menu.append(&MenuItem::with_id(handle, QUIT_ID, label, true, Some("CmdOrCtrl+Q"))?)?;
+        app_menu.append(&MenuItem::with_id(
+            handle,
+            QUIT_ID,
+            label,
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?)?;
     }
     app.set_menu(menu)?;
     Ok(())

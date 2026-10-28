@@ -46,7 +46,10 @@ fn fail(status: StatusCode, body: Value) -> Response {
 /// A request refused before it was sent, with the `detail` and `log` that say why.
 fn refuse(status: StatusCode, att: &Attempt, message: &str) -> Response {
     let (detail, log) = att.not_sent("request", message);
-    fail(status, json!({ "stage": "request", "error": message, "detail": detail, "log": log }))
+    fail(
+        status,
+        json!({ "stage": "request", "error": message, "detail": detail, "log": log }),
+    )
 }
 
 async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
@@ -55,7 +58,11 @@ async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
     let unsent = Attempt::start("GET", &target, HashMap::new(), Value::Null, 0);
     let low = target.to_lowercase();
     if !(low.starts_with("http://") || low.starts_with("https://")) {
-        return refuse(StatusCode::BAD_REQUEST, &unsent, "Not connected. The URL must start with http:// or https://.");
+        return refuse(
+            StatusCode::BAD_REQUEST,
+            &unsent,
+            "Not connected. The URL must start with http:// or https://.",
+        );
     }
     let headers = match super::ws::decode_headers(q.headers.as_deref()) {
         Ok(h) => h,
@@ -67,13 +74,22 @@ async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
         .build()
     {
         Ok(c) => c,
-        Err(e) => return refuse(StatusCode::INTERNAL_SERVER_ERROR, &unsent, &format!("Not connected. {}", attempt::describe(&e))),
+        Err(e) => {
+            return refuse(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &unsent,
+                &format!("Not connected. {}", attempt::describe(&e)),
+            )
+        }
     };
     let mut rb = client.get(&target).header("accept", "text/event-stream");
     let mut sent: HashMap<String, String> = HashMap::new();
     sent.insert("accept".into(), "text/event-stream".into());
     for (k, v) in headers {
-        sent.insert(k.to_string(), String::from_utf8_lossy(v.as_bytes()).to_string());
+        sent.insert(
+            k.to_string(),
+            String::from_utf8_lossy(v.as_bytes()).to_string(),
+        );
         rb = rb.header(k.as_str(), v.as_bytes());
     }
     if !sent.contains_key("user-agent") {
@@ -81,13 +97,23 @@ async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
         rb = rb.header("user-agent", ua.as_str());
         sent.insert("user-agent".into(), ua);
     }
-    let att = Attempt::start("GET", &attempt::redact_url(&target), sent.clone(), Value::Null, 0);
+    let att = Attempt::start(
+        "GET",
+        &attempt::redact_url(&target),
+        sent.clone(),
+        Value::Null,
+        0,
+    );
 
-    let upstream = match tokio::time::timeout(Duration::from_millis(CONNECT_TIMEOUT_MS), rb.send()).await {
+    let upstream = match tokio::time::timeout(Duration::from_millis(CONNECT_TIMEOUT_MS), rb.send())
+        .await
+    {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             let timed_out = e.is_timeout();
-            let (detail, log) = att.failed("network", &e.without_url(), timed_out, CONNECT_TIMEOUT_MS).await;
+            let (detail, log) = att
+                .failed("network", &e.without_url(), timed_out, CONNECT_TIMEOUT_MS)
+                .await;
             return fail(
                 StatusCode::BAD_GATEWAY,
                 json!({ "stage": "network", "error": detail["message"].clone(), "detail": detail, "log": log, "ms": att.elapsed_ms() }),
@@ -127,7 +153,9 @@ async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
         // the refusal is the answer; a failure reading its body is noted, not hidden
         let (bytes, total, body_error) = read_excerpt(upstream).await;
         let body = String::from_utf8_lossy(&bytes).to_string();
-        let chain: Vec<String> = std::iter::once(message.clone()).chain(body_error.clone()).collect();
+        let chain: Vec<String> = std::iter::once(message.clone())
+            .chain(body_error.clone())
+            .collect();
         let (mut detail, _) = att.server_refused("response", chain, "http");
         detail["message"] = json!(message);
         detail["hints"] = json!(status_hints(status.as_u16(), &sent));
@@ -149,7 +177,10 @@ async fn proxy(Query(q): Query<ProxyQuery>) -> Response {
         );
     }
 
-    let warning = if content_type.to_ascii_lowercase().starts_with("text/event-stream") {
+    let warning = if content_type
+        .to_ascii_lowercase()
+        .starts_with("text/event-stream")
+    {
         Value::Null
     } else {
         json!(format!(
@@ -207,7 +238,12 @@ async fn read_excerpt(resp: reqwest::Response) -> (Vec<u8>, usize, Option<String
     let mut stream = resp.bytes_stream();
     let read = async {
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("its body could not be read: {}", attempt::describe(&e.without_url())))?;
+            let chunk = chunk.map_err(|e| {
+                format!(
+                    "its body could not be read: {}",
+                    attempt::describe(&e.without_url())
+                )
+            })?;
             total += chunk.len();
             let room = BODY_EXCERPT.saturating_sub(kept.len());
             kept.extend_from_slice(&chunk[..chunk.len().min(room)]);
@@ -220,7 +256,10 @@ async fn read_excerpt(resp: reqwest::Response) -> (Vec<u8>, usize, Option<String
     let error = match tokio::time::timeout(BODY_TIMEOUT, read).await {
         Ok(Ok(())) => None,
         Ok(Err(e)) => Some(e),
-        Err(_) => Some(format!("its body was still arriving after {} s; the start is shown", BODY_TIMEOUT.as_secs())),
+        Err(_) => Some(format!(
+            "its body was still arriving after {} s; the start is shown",
+            BODY_TIMEOUT.as_secs()
+        )),
     };
     (kept, total, error)
 }
@@ -308,7 +347,12 @@ impl SseParser {
                     }
                 }
                 if std::mem::take(&mut self.skipping) {
-                    out.push(SseEvent { event: "conduit-warning".into(), data: format!("a line longer than {LINE_MAX} bytes was dropped"), id: None, retry: None });
+                    out.push(SseEvent {
+                        event: "conduit-warning".into(),
+                        data: format!("a line longer than {LINE_MAX} bytes was dropped"),
+                        id: None,
+                        retry: None,
+                    });
                 } else if let Some(ev) = self.line(&line) {
                     out.push(ev);
                 }
@@ -338,7 +382,11 @@ impl SseParser {
             let retry = self.retry.take();
             let data = self.data.take()?;
             return Some(SseEvent {
-                event: if event.is_empty() { "message".into() } else { event },
+                event: if event.is_empty() {
+                    "message".into()
+                } else {
+                    event
+                },
                 data,
                 id: self.id.clone(),
                 retry,
@@ -388,8 +436,18 @@ mod tests {
         assert_eq!(
             evs,
             vec![
-                SseEvent { event: "price".into(), data: "{\"a\":1}".into(), id: Some("7".into()), retry: Some(3000) },
-                SseEvent { event: "message".into(), data: "plain".into(), id: Some("7".into()), retry: None },
+                SseEvent {
+                    event: "price".into(),
+                    data: "{\"a\":1}".into(),
+                    id: Some("7".into()),
+                    retry: Some(3000)
+                },
+                SseEvent {
+                    event: "message".into(),
+                    data: "plain".into(),
+                    id: Some("7".into()),
+                    retry: None
+                },
             ]
         );
     }
@@ -403,7 +461,13 @@ mod tests {
 
     #[test]
     fn line_endings_and_chunk_splits_do_not_matter() {
-        let evs = all(&[b"data: x\r", b"\n\r", b"\ndata: y\r\r", b"data: \xc3", b"\xa9\n\n"]);
+        let evs = all(&[
+            b"data: x\r",
+            b"\n\r",
+            b"\ndata: y\r\r",
+            b"data: \xc3",
+            b"\xa9\n\n",
+        ]);
         let data: Vec<&str> = evs.iter().map(|e| e.data.as_str()).collect();
         assert_eq!(data, vec!["x", "y", "é"]);
     }
@@ -449,7 +513,9 @@ mod tests {
         let app = Router::new().route(
             "/",
             get(|| async {
-                let chunks = futures_util::stream::iter((0..10_000).map(|_| Ok::<_, std::io::Error>(vec![b'e'; 1024])));
+                let chunks = futures_util::stream::iter(
+                    (0..10_000).map(|_| Ok::<_, std::io::Error>(vec![b'e'; 1024])),
+                );
                 (StatusCode::FORBIDDEN, Body::from_stream(chunks))
             }),
         );

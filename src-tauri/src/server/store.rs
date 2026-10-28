@@ -33,7 +33,10 @@ pub fn routes() -> Router {
 }
 
 async fn read() -> Json<Value> {
-    match std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+    match std::fs::read_to_string(file())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+    {
         Some(v) => Json(v),
         None => Json(json!({})),
     }
@@ -113,9 +116,15 @@ mod tests {
         let body: Value = serde_json::from_slice(&beacon.bytes().await.unwrap()).unwrap();
         assert_eq!(body["ok"], true, "{body}");
         assert!(last_flush() >= 9);
-        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
         assert_eq!(saved["k"], "from a beacon");
-        let bad = reqwest::Client::new().post(format!("http://{addr}/")).body("not json").send().await.unwrap();
+        let bad = reqwest::Client::new()
+            .post(format!("http://{addr}/"))
+            .body("not json")
+            .send()
+            .await
+            .unwrap();
         let body: Value = serde_json::from_slice(&bad.bytes().await.unwrap()).unwrap();
         assert_eq!(body["ok"], false);
         let _ = std::fs::remove_dir_all(&dir);

@@ -10,9 +10,7 @@ use axum::{
 };
 use base64::Engine;
 use futures_util::stream::{Stream, StreamExt};
-use pulsar::{
-    consumer::InitialPosition, producer, Authentication, Pulsar, SubType, TokioExecutor,
-};
+use pulsar::{consumer::InitialPosition, producer, Authentication, Pulsar, SubType, TokioExecutor};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -61,12 +59,19 @@ fn topic_path(topic: &str) -> String {
 
 /// A request refused before anything was sent (a missing field), in the failure shape.
 fn not_sent(message: &str) -> Value {
-    failure(plain_error("request", "request", message, vec![]), Value::Null, 0)
+    failure(
+        plain_error("request", "request", message, vec![]),
+        Value::Null,
+        0,
+    )
 }
 
 /// The refusal for a call that needs a topic and got none.
 fn need_topic(topic: &str) -> Option<Value> {
-    topic.trim().is_empty().then(|| not_sent("Enter a topic first."))
+    topic
+        .trim()
+        .is_empty()
+        .then(|| not_sent("Enter a topic first."))
 }
 
 /// The failure shape every panel reads: `{ ok:false, stage, error, detail, durationMs, log }`.
@@ -134,7 +139,9 @@ async fn admin_call(
 ) -> Result<AdminReply, Value> {
     // every admin route comes through here, so this one check covers them all
     if admin_url.trim().is_empty() {
-        return Err(not_sent("Set the Admin URL first (usually http://host:8080)."));
+        return Err(not_sent(
+            "Set the Admin URL first (usually http://host:8080).",
+        ));
     }
     let url = format!("{}{}", base_of(admin_url), path);
     let attempt = Attempt::start(
@@ -154,7 +161,9 @@ async fn admin_call(
         Err(e) => {
             let timed_out = e.is_timeout();
             let stage = if timed_out { "timeout" } else { "network" };
-            let (error, log) = attempt.failed(stage, &e.without_url(), timed_out, timeout_ms).await;
+            let (error, log) = attempt
+                .failed(stage, &e.without_url(), timed_out, timeout_ms)
+                .await;
             return Err(failure(error, log, attempt.elapsed_ms()));
         }
     };
@@ -168,13 +177,15 @@ async fn admin_call(
         Ok(b) => b.to_vec(),
         Err(e) => {
             let timed_out = e.is_timeout();
-            let (error, log) = attempt.failed("body", &e.without_url(), timed_out, timeout_ms).await;
+            let (error, log) = attempt
+                .failed("body", &e.without_url(), timed_out, timeout_ms)
+                .await;
             return Err(failure(error, log, attempt.elapsed_ms()));
         }
     };
     let text = String::from_utf8_lossy(&body);
-    let shown = serde_json::from_slice::<Value>(&body)
-        .unwrap_or_else(|_| Value::String(snip(&text, 4000)));
+    let shown =
+        serde_json::from_slice::<Value>(&body).unwrap_or_else(|_| Value::String(snip(&text, 4000)));
     let log = attempt.succeeded(Reply {
         status,
         headers: &headers,
@@ -191,13 +202,20 @@ async fn admin_call(
 }
 
 /// A GET whose answer is JSON: `(json, log)`.
-async fn admin_get(admin_url: &str, path: &str, token: &Option<String>) -> Result<(Value, Value), Value> {
+async fn admin_get(
+    admin_url: &str,
+    path: &str,
+    token: &Option<String>,
+) -> Result<(Value, Value), Value> {
     let client = reqwest::Client::new();
     let r = admin_call(&client, admin_url, path, reqwest::Method::GET, token).await?;
     match serde_json::from_slice::<Value>(&r.body) {
         Ok(v) => Ok((v, r.log)),
         Err(e) => {
-            let message = format!("the admin API answered, but not with JSON: {}", describe(&e));
+            let message = format!(
+                "the admin API answered, but not with JSON: {}",
+                describe(&e)
+            );
             let dur = r.log["durationMs"].as_u64().unwrap_or(0) as u128;
             Err(failure(
                 plain_error("decode", "body", &message, vec!["Check that the Admin URL points at the Pulsar admin API (usually http://host:8080), not at a web page.".into()]),
@@ -227,7 +245,9 @@ struct TenantsReq {
 
 async fn tenants(Json(b): Json<TenantsReq>) -> Json<Value> {
     match admin_get(&b.admin_url, "/admin/v2/tenants", &b.token).await {
-        Ok((v, log)) => Json(json!({ "ok": true, "tenants": string_list(&v, |s| s.to_string()), "log": log })),
+        Ok((v, log)) => {
+            Json(json!({ "ok": true, "tenants": string_list(&v, |s| s.to_string()), "log": log }))
+        }
         Err(f) => Json(f),
     }
 }
@@ -242,7 +262,13 @@ struct NamespacesReq {
 
 async fn namespaces(Json(b): Json<NamespacesReq>) -> Json<Value> {
     let tenant = b.tenant.unwrap_or_else(|| "public".into());
-    match admin_get(&b.admin_url, &format!("/admin/v2/namespaces/{}", urlencode(&tenant)), &b.token).await {
+    match admin_get(
+        &b.admin_url,
+        &format!("/admin/v2/namespaces/{}", urlencode(&tenant)),
+        &b.token,
+    )
+    .await
+    {
         Ok((v, log)) => {
             let list = string_list(&v, |s| s.rsplit('/').next().unwrap_or(s).to_string());
             Json(json!({ "ok": true, "namespaces": list, "log": log }))
@@ -263,9 +289,15 @@ struct TopicsReq {
 async fn topics(Json(b): Json<TopicsReq>) -> Json<Value> {
     let tenant = b.tenant.unwrap_or_else(|| "public".into());
     let namespace = b.namespace.unwrap_or_else(|| "default".into());
-    let path = format!("/admin/v2/persistent/{}/{}", urlencode(&tenant), urlencode(&namespace));
+    let path = format!(
+        "/admin/v2/persistent/{}/{}",
+        urlencode(&tenant),
+        urlencode(&namespace)
+    );
     match admin_get(&b.admin_url, &path, &b.token).await {
-        Ok((v, log)) => Json(json!({ "ok": true, "topics": string_list(&v, |s| s.to_string()), "log": log })),
+        Ok((v, log)) => {
+            Json(json!({ "ok": true, "topics": string_list(&v, |s| s.to_string()), "log": log }))
+        }
         Err(f) => Json(f),
     }
 }
@@ -292,7 +324,11 @@ async fn subs(Json(b): Json<SubsReq>) -> Json<Value> {
     if let Some(map) = stats.get("subscriptions").and_then(|s| s.as_object()) {
         for (name, s) in map {
             let backlog = s.get("msgBacklog").and_then(|x| x.as_i64()).unwrap_or(0);
-            let consumers = s.get("consumers").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+            let consumers = s
+                .get("consumers")
+                .and_then(|x| x.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
             let rate = s.get("msgRateOut").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let rate = (rate * 10.0).round() / 10.0;
             out.push(json!({
@@ -380,7 +416,9 @@ struct PeekReq {
 fn peek_message(pos: i64, headers: &HashMap<String, String>, body: &[u8]) -> Value {
     let h = |k: &str| headers.get(k).cloned();
     let mut props = serde_json::Map::new();
-    if let Some(Value::Object(m)) = h("x-pulsar-properties").and_then(|s| serde_json::from_str(&s).ok()) {
+    if let Some(Value::Object(m)) =
+        h("x-pulsar-properties").and_then(|s| serde_json::from_str(&s).ok())
+    {
         props = m;
     }
     for (k, v) in headers {
@@ -406,7 +444,9 @@ fn peek_message(pos: i64, headers: &HashMap<String, String>, body: &[u8]) -> Val
 /// Whether `m` was already read: past the last message examinemessage keeps answering with the
 /// last one, so a repeated id is the end of the topic.
 fn repeats(read: &[Value], m: &Value) -> bool {
-    m["messageId"].as_str().is_some_and(|id| read.iter().any(|r| r["messageId"].as_str() == Some(id)))
+    m["messageId"]
+        .as_str()
+        .is_some_and(|id| read.iter().any(|r| r["messageId"].as_str() == Some(id)))
 }
 
 /// Why a peek ended before `wanted` messages, once `got` were read.
@@ -422,7 +462,10 @@ async fn peek(Json(b): Json<PeekReq>) -> Json<Value> {
     let count = b
         .count
         .as_ref()
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(5);
     let n = count.clamp(1, 20);
     let client = reqwest::Client::new();
@@ -449,7 +492,12 @@ async fn peek(Json(b): Json<PeekReq>) -> Json<Value> {
                 if messages.is_empty() {
                     return Json(f);
                 }
-                warning = Some(stopped_early(messages.len(), n, i, f["error"].as_str().unwrap_or("")));
+                warning = Some(stopped_early(
+                    messages.len(),
+                    n,
+                    i,
+                    f["error"].as_str().unwrap_or(""),
+                ));
                 log = f["log"].clone();
                 break;
             }
@@ -514,7 +562,9 @@ fn oauth_credentials_url(client_id: &str, client_secret: &str, issuer_url: &str)
 }
 
 /// A connected client, or where it stopped (`connect` or `timeout`) and the cause chain of why.
-async fn build_client(conn: &ConnConfig) -> Result<Pulsar<TokioExecutor>, (&'static str, Vec<String>)> {
+async fn build_client(
+    conn: &ConnConfig,
+) -> Result<Pulsar<TokioExecutor>, (&'static str, Vec<String>)> {
     let mut builder = Pulsar::builder(conn.service_url.clone(), TokioExecutor);
     match conn.auth_type.as_str() {
         "token" => {
@@ -551,7 +601,10 @@ async fn build_client(conn: &ConnConfig) -> Result<Pulsar<TokioExecutor>, (&'sta
 
 /// Why a connect step gave up: nothing answered within [`CONNECT_TIMEOUT`].
 fn connect_timed_out(what: &str) -> String {
-    format!("no answer from {what} within {} s", CONNECT_TIMEOUT.as_secs())
+    format!(
+        "no answer from {what} within {} s",
+        CONNECT_TIMEOUT.as_secs()
+    )
 }
 
 #[derive(Deserialize)]
@@ -592,7 +645,10 @@ async fn send_one(
         .await
         .map_err(|e| ("producer", chain(&e)))?;
     let result = async {
-        let fut = producer.send_non_blocking(msg).await.map_err(|e| chain(&e))?;
+        let fut = producer
+            .send_non_blocking(msg)
+            .await
+            .map_err(|e| chain(&e))?;
         fut.await.map_err(|e| chain(&e))
     }
     .await;
@@ -656,13 +712,19 @@ async fn produce(Json(b): Json<ProduceReq>) -> Json<Value> {
         Ok(Err((stage, chain))) => {
             // the connect step has its own, shorter limit
             let timed_out = stage == "timeout";
-            let limit = if timed_out { CONNECT_TIMEOUT.as_millis() as u64 } else { timeout_ms };
+            let limit = if timed_out {
+                CONNECT_TIMEOUT.as_millis() as u64
+            } else {
+                timeout_ms
+            };
             let (error, log) = attempt.failed_with(stage, chain, timed_out, limit).await;
             Json(failure(error, log, attempt.elapsed_ms()))
         }
         Err(_) => {
             let chain = vec![format!("no receipt within {timeout_ms} ms")];
-            let (error, log) = attempt.failed_with("timeout", chain, true, timeout_ms).await;
+            let (error, log) = attempt
+                .failed_with("timeout", chain, true, timeout_ms)
+                .await;
             Json(failure(error, log, attempt.elapsed_ms()))
         }
     }
@@ -895,7 +957,10 @@ mod tests {
 
     #[test]
     fn a_peek_stops_at_the_first_repeated_message() {
-        let read = vec![json!({ "messageId": "5:6:-1" }), json!({ "messageId": "5:7:-1" })];
+        let read = vec![
+            json!({ "messageId": "5:6:-1" }),
+            json!({ "messageId": "5:7:-1" }),
+        ];
         assert!(repeats(&read, &json!({ "messageId": "5:7:-1" })));
         assert!(!repeats(&read, &json!({ "messageId": "5:8:-1" })));
         assert!(!repeats(&read, &json!({ "messageId": null })));
@@ -903,22 +968,35 @@ mod tests {
 
     #[test]
     fn only_a_generated_subscription_is_non_durable() {
-        assert_eq!(consumer_options(InitialPosition::Latest, true).durable, Some(false));
-        assert_eq!(consumer_options(InitialPosition::Latest, false).durable, None);
+        assert_eq!(
+            consumer_options(InitialPosition::Latest, true).durable,
+            Some(false)
+        );
+        assert_eq!(
+            consumer_options(InitialPosition::Latest, false).durable,
+            None
+        );
     }
 
     #[test]
     fn a_peek_that_stops_early_says_how_far_it_got_and_why() {
         let w = stopped_early(2, 5, 3, "HTTP 404: not found");
-        assert!(w.contains("2 of 5") && w.contains("#3") && w.contains("HTTP 404"), "{w}");
+        assert!(
+            w.contains("2 of 5") && w.contains("#3") && w.contains("HTTP 404"),
+            "{w}"
+        );
     }
 
     #[test]
     fn oauth_credentials_never_touch_the_disk() {
         let url = oauth_credentials_url("id", "s3cret", "https://issuer.test");
-        let b64 = url.strip_prefix("data:application/json;base64,").expect(&url);
+        let b64 = url
+            .strip_prefix("data:application/json;base64,")
+            .expect(&url);
         let doc: Value = serde_json::from_slice(
-            &base64::engine::general_purpose::STANDARD.decode(b64).unwrap(),
+            &base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .unwrap(),
         )
         .unwrap();
         assert_eq!(doc["client_secret"], "s3cret");
@@ -935,27 +1013,50 @@ mod tests {
 
     #[test]
     fn topic_paths_encode_each_segment() {
-        assert_eq!(topic_path("persistent://t/ns/orders"), "persistent/t/ns/orders");
-        assert_eq!(topic_path("non-persistent://t/ns/a b"), "non-persistent/t/ns/a%20b");
+        assert_eq!(
+            topic_path("persistent://t/ns/orders"),
+            "persistent/t/ns/orders"
+        );
+        assert_eq!(
+            topic_path("non-persistent://t/ns/a b"),
+            "non-persistent/t/ns/a%20b"
+        );
         assert_eq!(topic_path("orders"), "persistent/public/default/orders");
-        assert_eq!(topic_path("persistent://t/ns/q?x#y"), "persistent/t/ns/q%3Fx%23y");
+        assert_eq!(
+            topic_path("persistent://t/ns/q?x#y"),
+            "persistent/t/ns/q%3Fx%23y"
+        );
     }
 
     #[test]
     fn a_typed_subscription_needs_confirmation() {
         assert_eq!(pick_subscription(None, false, 7), Ok("conduit-7".into()));
-        assert_eq!(pick_subscription(Some("  "), false, 7), Ok("conduit-7".into()));
-        assert!(pick_subscription(Some("billing"), false, 7).unwrap_err().contains("billing"));
-        assert_eq!(pick_subscription(Some("billing"), true, 7), Ok("billing".into()));
+        assert_eq!(
+            pick_subscription(Some("  "), false, 7),
+            Ok("conduit-7".into())
+        );
+        assert!(pick_subscription(Some("billing"), false, 7)
+            .unwrap_err()
+            .contains("billing"));
+        assert_eq!(
+            pick_subscription(Some("billing"), true, 7),
+            Ok("billing".into())
+        );
     }
 
     #[tokio::test]
     async fn an_empty_admin_url_is_refused_before_sending() {
         let client = reqwest::Client::new();
-        let f = admin_call(&client, "  ", "/admin/v2/tenants", reqwest::Method::GET, &None)
-            .await
-            .err()
-            .expect("refused");
+        let f = admin_call(
+            &client,
+            "  ",
+            "/admin/v2/tenants",
+            reqwest::Method::GET,
+            &None,
+        )
+        .await
+        .err()
+        .expect("refused");
         assert_eq!(f["ok"], false);
         assert_eq!(f["detail"]["kind"], "request");
         assert!(f["error"].as_str().unwrap().contains("Admin URL"));

@@ -92,7 +92,10 @@ pub enum Failure {
 impl Failure {
     pub fn chain(&self) -> &[String] {
         match self {
-            Failure::Invalid(c) | Failure::Network(c) | Failure::TimedOut(c) | Failure::Reply(c) => c,
+            Failure::Invalid(c)
+            | Failure::Network(c)
+            | Failure::TimedOut(c)
+            | Failure::Reply(c) => c,
         }
     }
 
@@ -108,9 +111,10 @@ impl Failure {
     /// The same failure, with `what` was being done as the outermost layer.
     pub fn context(mut self, what: &str) -> Self {
         match &mut self {
-            Failure::Invalid(c) | Failure::Network(c) | Failure::TimedOut(c) | Failure::Reply(c) => {
-                c.insert(0, what.into())
-            }
+            Failure::Invalid(c)
+            | Failure::Network(c)
+            | Failure::TimedOut(c)
+            | Failure::Reply(c) => c.insert(0, what.into()),
         }
         self
     }
@@ -480,8 +484,12 @@ mod tests {
         let refused: redis::RedisError =
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "Connection refused").into();
         assert!(matches!(Failure::from(refused), Failure::Network(_)));
-        let wrong: redis::RedisError =
-            (redis::ErrorKind::TypeError, "WRONGTYPE", "wrong kind of value".to_string()).into();
+        let wrong: redis::RedisError = (
+            redis::ErrorKind::TypeError,
+            "WRONGTYPE",
+            "wrong kind of value".to_string(),
+        )
+            .into();
         assert!(matches!(Failure::from(wrong), Failure::Reply(_)));
         let bad: redis::RedisError = (redis::ErrorKind::InvalidClientConfig, "bad url").into();
         assert!(matches!(Failure::from(bad), Failure::Invalid(_)));

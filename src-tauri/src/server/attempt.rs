@@ -99,7 +99,11 @@ impl Attempt {
         let chain = tidy(chain);
         let kind = kind(&chain, timed_out);
         let probe = probe(&self.url).await;
-        let target = Target { method: &self.method, url: &self.url, headers: &self.request_headers };
+        let target = Target {
+            method: &self.method,
+            url: &self.url,
+            headers: &self.request_headers,
+        };
         let hints = hints(&target, kind, &chain, &probe, timeout_ms);
         let message = if timed_out {
             format!("no complete answer within {timeout_ms} ms")
@@ -173,7 +177,12 @@ impl Attempt {
     }
 
     fn stats(&self, received: usize) -> Value {
-        let secs = self.end().0.duration_since(self.started).as_secs_f64().max(0.001);
+        let secs = self
+            .end()
+            .0
+            .duration_since(self.started)
+            .as_secs_f64()
+            .max(0.001);
         let kbps = |bytes: usize| ((bytes as f64 / 1024.0 / secs) * 100.0).round() / 100.0;
         json!({
             "sentBytes": self.request_bytes,
@@ -254,9 +263,23 @@ fn readable_cert_times(msg: &str) -> String {
         };
         Some(format!("{}{text}{}", &msg[..start], &msg[end..]))
     };
-    rewrite(msg, "certificate expired: verification time", "not valid after ", "seconds ago)", true)
-        .or_else(|| rewrite(msg, "certificate not valid yet: verification time", "not valid before ", "seconds in future)", false))
-        .unwrap_or_else(|| msg.to_string())
+    rewrite(
+        msg,
+        "certificate expired: verification time",
+        "not valid after ",
+        "seconds ago)",
+        true,
+    )
+    .or_else(|| {
+        rewrite(
+            msg,
+            "certificate not valid yet: verification time",
+            "not valid before ",
+            "seconds in future)",
+            false,
+        )
+    })
+    .unwrap_or_else(|| msg.to_string())
 }
 
 /// `secs` before now (negative: after now) as "3 days ago" / "in 5 hours".
@@ -309,7 +332,11 @@ pub fn kind(chain: &[String], timed_out: bool) -> &'static str {
     }
     // a client that tries several addresses reports every one: a handshake that got as far as
     // TLS says more than a refusal on another address
-    if has(&["ssl handshake failed", "plaintext broker listener", "connecting to a ssl listener"]) {
+    if has(&[
+        "ssl handshake failed",
+        "plaintext broker listener",
+        "connecting to a ssl listener",
+    ]) {
         return "tls";
     }
     if has(&[
@@ -366,7 +393,9 @@ fn probe_target(raw: &str) -> Result<(String, String, Option<u16>), &'static str
         let mut port = None;
         for pair in raw.split_whitespace() {
             match pair.split_once('=') {
-                Some(("host" | "hostaddr", v)) if host.is_none() => host = Some(v.trim_matches('\'').to_string()),
+                Some(("host" | "hostaddr", v)) if host.is_none() => {
+                    host = Some(v.trim_matches('\'').to_string())
+                }
                 Some(("port", v)) => port = v.trim_matches('\'').parse().ok(),
                 _ => {}
             }
@@ -379,7 +408,11 @@ fn probe_target(raw: &str) -> Result<(String, String, Option<u16>), &'static str
         }
         return Ok(("postgres".into(), host, port.or(Some(5432))));
     }
-    let raw = if raw.contains("://") { raw.to_string() } else { format!("tcp://{raw}") };
+    let raw = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("tcp://{raw}")
+    };
     let url = url::Url::parse(&raw).map_err(|_| "not a URL")?;
     let scheme = url.scheme().to_string();
     let host = url
@@ -461,7 +494,11 @@ pub async fn probe(raw_url: &str) -> Value {
     let tcp = if tries.is_empty() {
         Value::Null
     } else {
-        tries.iter().find(|t| t["ok"] == true).unwrap_or(&tries[0]).clone()
+        tries
+            .iter()
+            .find(|t| t["ok"] == true)
+            .unwrap_or(&tries[0])
+            .clone()
     };
     json!({ "scheme": scheme, "host": host, "port": port, "dns": dns, "tcp": tcp, "tcpAll": tries })
 }
@@ -486,7 +523,16 @@ fn default_port(scheme: &str) -> Option<u16> {
 pub const CERT_HINT: &str = "The server's certificate was not accepted (expired, self-signed, or for another name). The Diag panel's TLS check shows the certificate.";
 
 const SECRET_WORDS: [&str; 10] = [
-    "auth", "token", "key", "secret", "cookie", "session", "signature", "passw", "pwd", "credential",
+    "auth",
+    "token",
+    "key",
+    "secret",
+    "cookie",
+    "session",
+    "signature",
+    "passw",
+    "pwd",
+    "credential",
 ];
 
 /// Whether a header, query or parameter name carries a credential. The same rule as
@@ -519,8 +565,20 @@ fn redact_keywords(raw: &str) -> String {
         } else {
             after.find(char::is_whitespace).unwrap_or(after.len())
         };
-        let key = if key.is_empty() { before.trim_end().rsplit(char::is_whitespace).next().unwrap_or("") } else { key };
-        out.push_str(if is_secret_name(key) { "•••" } else { &after[..end] });
+        let key = if key.is_empty() {
+            before
+                .trim_end()
+                .rsplit(char::is_whitespace)
+                .next()
+                .unwrap_or("")
+        } else {
+            key
+        };
+        out.push_str(if is_secret_name(key) {
+            "•••"
+        } else {
+            &after[..end]
+        });
         rest = &after[end..];
     }
     out.push_str(rest);
@@ -622,7 +680,13 @@ fn family(t: &Target, scheme: &str) -> Family {
         match scheme {
             "redis" | "rediss" => Family::Redis,
             "ws" | "wss" => Family::Ws,
-            "http" | "https" if t.headers.keys().any(|k| k.eq_ignore_ascii_case("connect-protocol-version")) => Family::Connect,
+            "http" | "https"
+                if t.headers
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case("connect-protocol-version")) =>
+            {
+                Family::Connect
+            }
             "http" | "https" => Family::Http,
             _ => Family::Other,
         }
@@ -632,11 +696,17 @@ fn family(t: &Target, scheme: &str) -> Family {
 /// The fix when the server does not speak TLS where the client asked for it.
 fn not_tls_fix(f: Family) -> &'static str {
     match f {
-        Family::Http | Family::GrpcWeb | Family::Connect => "it probably speaks plain HTTP on this port. Try http://",
+        Family::Http | Family::GrpcWeb | Family::Connect => {
+            "it probably speaks plain HTTP on this port. Try http://"
+        }
         Family::Ws => "it probably speaks plain WebSocket on this port. Try ws://",
         Family::Grpc => "it serves plaintext gRPC on this port. Tick Plaintext",
-        Family::Kafka => "this broker listener is plaintext. Untick SSL, or use the broker's SSL listener port",
-        Family::Mongo => "remove tls=true or ssl=true from the URL, or use the port where MongoDB serves TLS",
+        Family::Kafka => {
+            "this broker listener is plaintext. Untick SSL, or use the broker's SSL listener port"
+        }
+        Family::Mongo => {
+            "remove tls=true or ssl=true from the URL, or use the port where MongoDB serves TLS"
+        }
         Family::Postgres => "use sslmode=prefer (TLS when offered) or sslmode=disable",
         Family::Mysql => "use ssl-mode=PREFERRED (TLS when offered) or ssl-mode=DISABLED",
         Family::Redis => "use redis:// instead of rediss://",
@@ -647,42 +717,74 @@ fn not_tls_fix(f: Family) -> &'static str {
 }
 
 /// Plain-language hints for a failure of `kind`, from the chain and the probe.
-pub fn hints(t: &Target, kind: &str, chain: &[String], probe: &Value, timeout_ms: u64) -> Vec<String> {
+pub fn hints(
+    t: &Target,
+    kind: &str,
+    chain: &[String],
+    probe: &Value,
+    timeout_ms: u64,
+) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let all = chain_text(chain);
     let url = url::Url::parse(t.url).ok();
-    let scheme = url.as_ref().map(|u| u.scheme().to_string()).unwrap_or_default();
+    let scheme = url
+        .as_ref()
+        .map(|u| u.scheme().to_string())
+        .unwrap_or_default();
     let explicit_port = url.as_ref().and_then(|u| u.port());
     let port = url.as_ref().and_then(|u| u.port_or_known_default());
     let fam = family(t, &scheme);
-    let web = matches!(fam, Family::Http | Family::Ws | Family::GrpcWeb | Family::Connect);
+    let web = matches!(
+        fam,
+        Family::Http | Family::Ws | Family::GrpcWeb | Family::Connect
+    );
     let mut specific = false;
 
     if fam == Family::TlsCheck && port == Some(80) {
-        out.push("Port 80 usually serves plain HTTP, not TLS: check port 443, or use the HTTP check.".into());
+        out.push(
+            "Port 80 usually serves plain HTTP, not TLS: check port 443, or use the HTTP check."
+                .into(),
+        );
         specific = true;
     } else if web && (scheme == "https" || scheme == "wss") && explicit_port == Some(80) {
         let plain = if scheme == "wss" { "ws://" } else { "http://" };
-        out.push(format!("{scheme}:// to port 80: that port usually speaks plain HTTP. Try {plain}."));
+        out.push(format!(
+            "{scheme}:// to port 80: that port usually speaks plain HTTP. Try {plain}."
+        ));
         specific = true;
     }
     if web && (scheme == "http" || scheme == "ws") && port == Some(443) {
         let tls = if scheme == "ws" { "wss://" } else { "https://" };
-        out.push(format!("{scheme}:// to port 443: that port usually speaks TLS. Try {tls}."));
+        out.push(format!(
+            "{scheme}:// to port 443: that port usually speaks TLS. Try {tls}."
+        ));
         specific = true;
     }
 
     let not_tls = kind == "tls"
-        && ["invalidcontenttype", "wrong version number", "corrupt message", "plaintext broker", "packet length too long"]
-            .iter()
-            .any(|w| all.contains(w));
+        && [
+            "invalidcontenttype",
+            "wrong version number",
+            "corrupt message",
+            "plaintext broker",
+            "packet length too long",
+        ]
+        .iter()
+        .any(|w| all.contains(w));
     if not_tls && !specific {
-        out.push(format!("The server did not answer with TLS: {}.", not_tls_fix(fam)));
+        out.push(format!(
+            "The server did not answer with TLS: {}.",
+            not_tls_fix(fam)
+        ));
         specific = true;
     } else if kind == "tls" && all.contains("handshake eof") && !specific {
         out.push(format!("The connection opened, then closed in the middle of the TLS handshake: the port does not speak TLS ({}), or something in between (a VPN, proxy or load balancer) dropped it.", not_tls_fix(fam)));
         specific = true;
-    } else if kind == "tls" && ["certificate", "unknownissuer", "notvalidforname"].iter().any(|w| all.contains(w)) {
+    } else if kind == "tls"
+        && ["certificate", "unknownissuer", "notvalidforname"]
+            .iter()
+            .any(|w| all.contains(w))
+    {
         out.push(CERT_HINT.into());
         specific = true;
     }
@@ -696,28 +798,57 @@ pub fn hints(t: &Target, kind: &str, chain: &[String], probe: &Value, timeout_ms
         out.push(msg.into());
         specific = true;
     }
-    if fam == Family::Grpc && scheme == "http" && matches!(kind, "protocol" | "network") && !specific {
+    if fam == Family::Grpc
+        && scheme == "http"
+        && matches!(kind, "protocol" | "network")
+        && !specific
+    {
         out.push("The connection broke right after it opened. If this port serves TLS (443 usually does), untick Plaintext.".into());
         specific = true;
     }
-    if fam == Family::Kafka && (all.contains("connecting to a ssl listener") || all.contains("incorrect security.protocol")) {
-        out.push("The broker expects TLS on this port: tick SSL, or use its plaintext listener port.".into());
+    if fam == Family::Kafka
+        && (all.contains("connecting to a ssl listener")
+            || all.contains("incorrect security.protocol"))
+    {
+        out.push(
+            "The broker expects TLS on this port: tick SSL, or use its plaintext listener port."
+                .into(),
+        );
         specific = true;
     }
 
-    let tries: Vec<&Value> = probe["tcpAll"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
+    let tries: Vec<&Value> = probe["tcpAll"]
+        .as_array()
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
     let tcp_ok = probe["tcp"]["ok"].as_bool();
     let refused = all.contains("refused")
-        || probe["tcp"]["error"].as_str().is_some_and(|e| e.to_lowercase().contains("refused"));
-    let ok_addrs: Vec<&str> = tries.iter().filter(|r| r["ok"] == true).filter_map(|r| r["address"].as_str()).collect();
-    let bad_addrs: Vec<&str> = tries.iter().filter(|r| r["ok"] == false).filter_map(|r| r["address"].as_str()).collect();
+        || probe["tcp"]["error"]
+            .as_str()
+            .is_some_and(|e| e.to_lowercase().contains("refused"));
+    let ok_addrs: Vec<&str> = tries
+        .iter()
+        .filter(|r| r["ok"] == true)
+        .filter_map(|r| r["address"].as_str())
+        .collect();
+    let bad_addrs: Vec<&str> = tries
+        .iter()
+        .filter(|r| r["ok"] == false)
+        .filter_map(|r| r["address"].as_str())
+        .collect();
     // only when the failure is about this port: a refusal elsewhere (a replica set member, say)
     // is not explained by this name's addresses
-    let other_port = probe["port"].as_u64().is_some_and(|p| mentioned_ports(&all).iter().any(|&q| q != p));
+    let other_port = probe["port"]
+        .as_u64()
+        .is_some_and(|p| mentioned_ports(&all).iter().any(|&q| q != p));
     let mixed = !ok_addrs.is_empty() && !bad_addrs.is_empty() && kind == "connect" && !other_port;
     let stand_in = probe["dns"]["addresses"]
         .as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str()?.parse::<IpAddr>().ok()).any(|ip| is_stand_in(&ip)))
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str()?.parse::<IpAddr>().ok())
+                .any(|ip| is_stand_in(&ip))
+        })
         .unwrap_or(false);
     let instant_local = tcp_ok == Some(true)
         && probe["tcp"]["ms"].as_u64().is_some_and(|ms| ms <= 1)
@@ -733,7 +864,10 @@ pub fn hints(t: &Target, kind: &str, chain: &[String], probe: &Value, timeout_ms
     }
     if mixed {
         let host = probe["host"].as_str().unwrap_or("the name");
-        let ok_ip = ok_addrs[0].rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']'])).unwrap_or(ok_addrs[0]);
+        let ok_ip = ok_addrs[0]
+            .rsplit_once(':')
+            .map(|(h, _)| h.trim_matches(['[', ']']))
+            .unwrap_or(ok_addrs[0]);
         out.push(format!(
             "{host} resolves to several addresses and only some accept connections ({} yes; {} no). The client may have used one that does not: connect to {ok_ip} instead of {host}.",
             ok_addrs.join(", "),
@@ -774,8 +908,14 @@ fn mentioned_ports(text: &str) -> Vec<u64> {
     let mut out = Vec::new();
     for (i, _) in text.match_indices(':') {
         let before_ok = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b']');
-        let digits: String = text[i + 1..].chars().take_while(|c| c.is_ascii_digit()).collect();
-        let after_ok = text[i + 1 + digits.len()..].chars().next().map_or(true, |c| !c.is_ascii_alphanumeric());
+        let digits: String = text[i + 1..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        let after_ok = text[i + 1 + digits.len()..]
+            .chars()
+            .next()
+            .map_or(true, |c| !c.is_ascii_alphanumeric());
         if before_ok && after_ok && (2..=5).contains(&digits.len()) {
             if let Ok(p) = digits.parse() {
                 out.push(p);
@@ -801,10 +941,22 @@ fn summary(kind: &str, chain: &[String], probe: &Value) -> String {
         "connect" if tcp_ok => format!("the connection to {target} failed after it opened"),
         "connect" if all.contains("refused") => format!("{target} refused the connection"),
         "connect" => format!("could not connect to {target}"),
-        "tls" if ["invalidcontenttype", "wrong version number", "corrupt message"].iter().any(|w| all.contains(w)) => {
+        "tls"
+            if [
+                "invalidcontenttype",
+                "wrong version number",
+                "corrupt message",
+            ]
+            .iter()
+            .any(|w| all.contains(w)) =>
+        {
             format!("{target} did not answer with TLS")
         }
-        "tls" if ["certificate", "unknownissuer", "notvalidforname"].iter().any(|w| all.contains(w)) => {
+        "tls"
+            if ["certificate", "unknownissuer", "notvalidforname"]
+                .iter()
+                .any(|w| all.contains(w)) =>
+        {
             format!("the certificate of {target} was not accepted")
         }
         "tls" => format!("the TLS handshake with {target} failed"),
@@ -823,8 +975,13 @@ mod tests {
     }
 
     fn http(url: &str) -> Target<'static> {
-        static NONE: once_cell::sync::Lazy<HashMap<String, String>> = once_cell::sync::Lazy::new(HashMap::new);
-        Target { method: "GET", url: Box::leak(url.to_string().into_boxed_str()), headers: &NONE }
+        static NONE: once_cell::sync::Lazy<HashMap<String, String>> =
+            once_cell::sync::Lazy::new(HashMap::new);
+        Target {
+            method: "GET",
+            url: Box::leak(url.to_string().into_boxed_str()),
+            headers: &NONE,
+        }
     }
 
     #[test]
@@ -847,7 +1004,14 @@ mod tests {
             "connection refused",
             "",
         ]));
-        assert_eq!(c, strings(&["error trying to connect", "tcp connect error", "Connection refused"]));
+        assert_eq!(
+            c,
+            strings(&[
+                "error trying to connect",
+                "tcp connect error",
+                "Connection refused"
+            ])
+        );
     }
 
     #[test]
@@ -856,8 +1020,14 @@ mod tests {
         let after = now - 3 * 86_400;
         let raw = format!("invalid peer certificate: certificate expired: verification time {now} (UNIX), but certificate is not valid after {after} ({} seconds ago)", now - after);
         let c = tidy(vec![raw]);
-        assert!(c[0].starts_with("invalid peer certificate: certificate expired: it was valid until "), "{c:?}");
-        assert!(c[0].ends_with("(3 days ago)") && !c[0].contains("UNIX"), "{c:?}");
+        assert!(
+            c[0].starts_with("invalid peer certificate: certificate expired: it was valid until "),
+            "{c:?}"
+        );
+        assert!(
+            c[0].ends_with("(3 days ago)") && !c[0].contains("UNIX"),
+            "{c:?}"
+        );
         assert_eq!(relative(-2 * 3600), "in 2 hours");
         assert_eq!(relative(1), "1 second ago");
     }
@@ -865,22 +1035,71 @@ mod tests {
     #[test]
     fn kinds_come_from_the_whole_chain() {
         let k = |s: &[&str]| kind(&strings(s), false);
-        assert_eq!(k(&["error sending request", "dns error", "failed to lookup address information"]), "dns");
-        assert_eq!(k(&["error sending request", "invalid peer certificate: UnknownIssuer"]), "tls");
-        assert_eq!(k(&["error sending request", "tcp connect error", "Connection refused (os error 61)"]), "connect");
-        assert_eq!(k(&["error sending request", "connection closed before message completed"]), "protocol");
-        assert_eq!(k(&["connection timed out: no answer within 10 s"]), "timeout");
+        assert_eq!(
+            k(&[
+                "error sending request",
+                "dns error",
+                "failed to lookup address information"
+            ]),
+            "dns"
+        );
+        assert_eq!(
+            k(&[
+                "error sending request",
+                "invalid peer certificate: UnknownIssuer"
+            ]),
+            "tls"
+        );
+        assert_eq!(
+            k(&[
+                "error sending request",
+                "tcp connect error",
+                "Connection refused (os error 61)"
+            ]),
+            "connect"
+        );
+        assert_eq!(
+            k(&[
+                "error sending request",
+                "connection closed before message completed"
+            ]),
+            "protocol"
+        );
+        assert_eq!(
+            k(&["connection timed out: no answer within 10 s"]),
+            "timeout"
+        );
         assert_eq!(k(&["Meta data fetch error: BrokerTransportFailure (Local: Broker transport failure)"]), "connect");
-        assert_eq!(k(&["BrokerTransportFailure", "ssl://b:9093/bootstrap: SSL handshake failed: certificate verify failed"]), "tls");
-        assert_eq!(k(&["BrokerTransportFailure", "Connect to ipv6#[::1]:9092 failed: Connection refused", "SSL handshake failed: Disconnected: connecting to a PLAINTEXT broker listener?"]), "tls");
+        assert_eq!(
+            k(&[
+                "BrokerTransportFailure",
+                "ssl://b:9093/bootstrap: SSL handshake failed: certificate verify failed"
+            ]),
+            "tls"
+        );
+        assert_eq!(
+            k(&[
+                "BrokerTransportFailure",
+                "Connect to ipv6#[::1]:9092 failed: Connection refused",
+                "SSL handshake failed: Disconnected: connecting to a PLAINTEXT broker listener?"
+            ]),
+            "tls"
+        );
         assert_eq!(kind(&[], true), "timeout");
     }
 
     #[test]
     fn a_url_in_the_chain_does_not_decide_the_kind() {
-        let c = strings(&["error sending request for url (https://tls.handshake.test/certificate)", "tcp connect error", "Connection refused"]);
+        let c = strings(&[
+            "error sending request for url (https://tls.handshake.test/certificate)",
+            "tcp connect error",
+            "Connection refused",
+        ]);
         assert_eq!(kind(&c, false), "connect");
-        let c = strings(&["error sending request for url (https://tls.test/)", "connection closed before message completed"]);
+        let c = strings(&[
+            "error sending request for url (https://tls.test/)",
+            "connection closed before message completed",
+        ]);
         assert_eq!(kind(&c, false), "protocol");
     }
 
@@ -888,9 +1107,16 @@ mod tests {
     fn a_reqwest_error_without_its_url_keeps_no_secret() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let e = rt
-            .block_on(reqwest::Client::new().get("http://u:pw@127.0.0.1:9/x?token=s3cret").send())
+            .block_on(
+                reqwest::Client::new()
+                    .get("http://u:pw@127.0.0.1:9/x?token=s3cret")
+                    .send(),
+            )
             .unwrap_err();
-        assert!(describe(&e).contains("s3cret"), "the leak this guards against");
+        assert!(
+            describe(&e).contains("s3cret"),
+            "the leak this guards against"
+        );
         let c = chain(&e.without_url());
         assert!(!c.join(" ").contains("s3cret"), "{c:?}");
         assert_eq!(kind(&c, false), "connect");
@@ -900,8 +1126,14 @@ mod tests {
     fn a_connection_string_keeps_its_host_and_loses_its_password() {
         let r = redact_url("postgres://app:s3cret@db.test:5432/main?sslmode=require&password=x");
         assert!(!r.contains("s3cret") && !r.contains("password=x"), "{r}");
-        assert!(r.contains("db.test:5432/main") && r.contains("sslmode=require"), "{r}");
-        assert_eq!(redact_url("redis://cache.test:6379"), "redis://cache.test:6379");
+        assert!(
+            r.contains("db.test:5432/main") && r.contains("sslmode=require"),
+            "{r}"
+        );
+        assert_eq!(
+            redact_url("redis://cache.test:6379"),
+            "redis://cache.test:6379"
+        );
         assert_eq!(redact_url("not a url"), "not a url");
         let at = redact_url("postgres://app:p@ss@db.test/main");
         assert!(!at.contains("ss@") && at.contains("@db.test/main"), "{at}");
@@ -909,14 +1141,32 @@ mod tests {
 
     #[test]
     fn one_word_list_covers_every_credential_name() {
-        for n in ["Authorization", "x-api-key", "apikey", "api_key", "access_token", "client_secret", "Cookie", "session_id", "x-hub-signature-256", "x-sig", "sig", "password", "passwd", "pwd"] {
+        for n in [
+            "Authorization",
+            "x-api-key",
+            "apikey",
+            "api_key",
+            "access_token",
+            "client_secret",
+            "Cookie",
+            "session_id",
+            "x-hub-signature-256",
+            "x-sig",
+            "sig",
+            "password",
+            "passwd",
+            "pwd",
+        ] {
             assert!(is_secret_name(n), "{n}");
         }
         for n in ["content-type", "design", "signal", "user"] {
             assert!(!is_secret_name(n), "{n}");
         }
         let r = redact_url("https://h.test/x?sig=abc&session=def&api_key=k&page=2");
-        assert!(!r.contains("abc") && !r.contains("def") && !r.contains("=k"), "{r}");
+        assert!(
+            !r.contains("abc") && !r.contains("def") && !r.contains("=k"),
+            "{r}"
+        );
         assert!(r.contains("page=2"), "{r}");
     }
 
@@ -929,11 +1179,17 @@ mod tests {
 
     #[test]
     fn a_keyword_connection_string_is_probed_at_its_host_and_port() {
-        assert_eq!(probe_target("host=db.test port=6543 user=u password=p").unwrap(), ("postgres".into(), "db.test".into(), Some(6543)));
+        assert_eq!(
+            probe_target("host=db.test port=6543 user=u password=p").unwrap(),
+            ("postgres".into(), "db.test".into(), Some(6543))
+        );
         assert_eq!(probe_target("dbname=x host = h").unwrap().2, Some(5432));
         assert_eq!(probe_target("user=u").unwrap().1, "localhost");
         assert!(probe_target("host=/var/run/postgresql").is_err());
-        assert_eq!(probe_target("b1:9092").unwrap(), ("tcp".into(), "b1".into(), Some(9092)));
+        assert_eq!(
+            probe_target("b1:9092").unwrap(),
+            ("tcp".into(), "b1".into(), Some(9092))
+        );
     }
 
     #[tokio::test]
@@ -942,7 +1198,12 @@ mod tests {
         let port = v4.local_addr().unwrap().port();
         let p = probe(&format!("http://localhost:{port}/")).await;
         let tries = p["tcpAll"].as_array().unwrap();
-        assert!(tries.iter().any(|t| t["address"] == format!("127.0.0.1:{port}") && t["ok"] == true), "{p}");
+        assert!(
+            tries
+                .iter()
+                .any(|t| t["address"] == format!("127.0.0.1:{port}") && t["ok"] == true),
+            "{p}"
+        );
         assert_eq!(p["tcp"]["ok"], true, "{p}");
         assert_eq!(p["tcp"]["address"], format!("127.0.0.1:{port}"));
     }
@@ -957,9 +1218,23 @@ mod tests {
                 { "address": "127.0.0.1:9092", "ok": true },
             ],
         });
-        let t = Target { method: "METADATA (Kafka)", url: "localhost:9092", headers: &HashMap::new() };
-        let h = hints(&t, "connect", &strings(&["Connect to ipv6#[::1]:9092 failed: Connection refused"]), &probe, 1000);
-        assert!(h.iter().any(|s| s.contains("connect to 127.0.0.1 instead of localhost")), "{h:?}");
+        let t = Target {
+            method: "METADATA (Kafka)",
+            url: "localhost:9092",
+            headers: &HashMap::new(),
+        };
+        let h = hints(
+            &t,
+            "connect",
+            &strings(&["Connect to ipv6#[::1]:9092 failed: Connection refused"]),
+            &probe,
+            1000,
+        );
+        assert!(
+            h.iter()
+                .any(|s| s.contains("connect to 127.0.0.1 instead of localhost")),
+            "{h:?}"
+        );
         assert!(!h.iter().any(|s| s.contains("Nothing accepts")), "{h:?}");
     }
 
@@ -973,24 +1248,56 @@ mod tests {
                 { "address": "127.0.0.1:27018", "ok": true },
             ],
         });
-        let t = Target { method: "SCHEMA (mongodb)", url: "mongodb://localhost:27018/", headers: &HashMap::new() };
-        let h = hints(&t, "connect", &strings(&["localhost:27017: I/O error: Connection refused (os error 61)"]), &probe, 1000);
+        let t = Target {
+            method: "SCHEMA (mongodb)",
+            url: "mongodb://localhost:27018/",
+            headers: &HashMap::new(),
+        };
+        let h = hints(
+            &t,
+            "connect",
+            &strings(&["localhost:27017: I/O error: Connection refused (os error 61)"]),
+            &probe,
+            1000,
+        );
         assert!(!h.iter().any(|s| s.contains("several addresses")), "{h:?}");
-        assert_eq!(mentioned_ports("connect to [::1]:9092 and b:1234 (os error 61)"), vec![9092, 1234]);
+        assert_eq!(
+            mentioned_ports("connect to [::1]:9092 and b:1234 (os error 61)"),
+            vec![9092, 1234]
+        );
     }
 
     #[tokio::test]
     async fn a_failures_duration_stops_before_the_probe() {
-        let attempt = Attempt::start("GET", "http://10.255.255.1:9/", HashMap::new(), Value::Null, 0);
-        let (_, log) = attempt.failed_with("network", vec!["refused".into()], false, 1000).await;
-        assert!(log["durationMs"].as_u64().unwrap() < 500, "{}", log["durationMs"]);
-        assert_eq!(attempt.elapsed_ms() as u64, log["durationMs"].as_u64().unwrap());
+        let attempt = Attempt::start(
+            "GET",
+            "http://10.255.255.1:9/",
+            HashMap::new(),
+            Value::Null,
+            0,
+        );
+        let (_, log) = attempt
+            .failed_with("network", vec!["refused".into()], false, 1000)
+            .await;
+        assert!(
+            log["durationMs"].as_u64().unwrap() < 500,
+            "{}",
+            log["durationMs"]
+        );
+        assert_eq!(
+            attempt.elapsed_ms() as u64,
+            log["durationMs"].as_u64().unwrap()
+        );
     }
 
     #[tokio::test]
     async fn the_headline_is_a_summary_not_the_last_cause() {
         let attempt = Attempt::start("GET", "http://127.0.0.1:9/", HashMap::new(), Value::Null, 0);
-        let c = strings(&["error sending request", "tcp connect error", "Connection refused (os error 61)"]);
+        let c = strings(&[
+            "error sending request",
+            "tcp connect error",
+            "Connection refused (os error 61)",
+        ]);
         let (error, _) = attempt.failed_with("network", c.clone(), false, 1000).await;
         assert_eq!(error["message"], "127.0.0.1:9 refused the connection");
         assert_eq!(error["chain"], json!(c));
@@ -998,7 +1305,13 @@ mod tests {
 
     #[test]
     fn a_record_never_holds_a_password_from_its_url() {
-        let a = Attempt::start("GET", "https://u:s3cret@h.test/x?token=t", HashMap::new(), Value::Null, 0);
+        let a = Attempt::start(
+            "GET",
+            "https://u:s3cret@h.test/x?token=t",
+            HashMap::new(),
+            Value::Null,
+            0,
+        );
         let log = a.not_sent("request", "x").1;
         let url = log["url"].as_str().unwrap();
         assert!(!url.contains("s3cret") && !url.contains("token=t"), "{url}");
@@ -1006,8 +1319,18 @@ mod tests {
 
     #[test]
     fn a_server_refusal_is_not_probed() {
-        let a = Attempt::start("QUERY", "postgres://h.test/db", HashMap::new(), Value::Null, 0);
-        let (error, _) = a.server_refused("query", vec!["syntax error at or near \"SELEC\"".into()], "database");
+        let a = Attempt::start(
+            "QUERY",
+            "postgres://h.test/db",
+            HashMap::new(),
+            Value::Null,
+            0,
+        );
+        let (error, _) = a.server_refused(
+            "query",
+            vec!["syntax error at or near \"SELEC\"".into()],
+            "database",
+        );
         assert_eq!(error["kind"], "database");
         assert!(error["probe"].is_null());
     }
@@ -1021,20 +1344,45 @@ mod tests {
             &json!({}),
             1000,
         );
-        assert_eq!(h.iter().filter(|s| s.contains("Try http://")).count(), 1, "{h:?}");
+        assert_eq!(
+            h.iter().filter(|s| s.contains("Try http://")).count(),
+            1,
+            "{h:?}"
+        );
     }
 
     #[test]
     fn tls_to_a_plain_port_is_hinted_in_the_protocols_own_terms() {
         let corrupt = strings(&["received corrupt message of type InvalidContentType"]);
         let none = HashMap::new();
-        let mongo = Target { method: "QUERY (mongodb)", url: "mongodb://h.test:27017/?tls=true", headers: &none };
+        let mongo = Target {
+            method: "QUERY (mongodb)",
+            url: "mongodb://h.test:27017/?tls=true",
+            headers: &none,
+        };
         let h = hints(&mongo, "tls", &corrupt, &json!({}), 1000);
-        assert!(h.iter().any(|s| s.contains("tls=true")) && !h.iter().any(|s| s.contains("http://")), "{h:?}");
-        let kafka = Target { method: "METADATA (Kafka)", url: "b.test:9092", headers: &none };
-        let h = hints(&kafka, "tls", &strings(&["SSL handshake failed: wrong version number"]), &json!({}), 1000);
+        assert!(
+            h.iter().any(|s| s.contains("tls=true")) && !h.iter().any(|s| s.contains("http://")),
+            "{h:?}"
+        );
+        let kafka = Target {
+            method: "METADATA (Kafka)",
+            url: "b.test:9092",
+            headers: &none,
+        };
+        let h = hints(
+            &kafka,
+            "tls",
+            &strings(&["SSL handshake failed: wrong version number"]),
+            &json!({}),
+            1000,
+        );
         assert!(h.iter().any(|s| s.contains("Untick SSL")), "{h:?}");
-        let diag = Target { method: "TLS", url: "https://h.test:80", headers: &none };
+        let diag = Target {
+            method: "TLS",
+            url: "https://h.test:80",
+            headers: &none,
+        };
         let h = hints(&diag, "tls", &corrupt, &json!({}), 1000);
         assert_eq!(h, vec!["Port 80 usually serves plain HTTP, not TLS: check port 443, or use the HTTP check.".to_string()]);
     }
@@ -1045,15 +1393,42 @@ mod tests {
         let mut connect = HashMap::new();
         connect.insert("connect-protocol-version".to_string(), "1".to_string());
         let c = strings(&["error sending request", "invalid HTTP version parsed"]);
-        let t = Target { method: "POST", url: "http://h.test:50051/a.B/C", headers: &connect };
+        let t = Target {
+            method: "POST",
+            url: "http://h.test:50051/a.B/C",
+            headers: &connect,
+        };
         let h = hints(&t, "protocol", &c, &json!({ "tcp": { "ok": true } }), 1000);
-        assert!(h[0].contains("not Connect: switch the call to gRPC"), "{h:?}");
+        assert!(
+            h[0].contains("not Connect: switch the call to gRPC"),
+            "{h:?}"
+        );
         assert!(!h.iter().any(|s| s.contains("VPN")), "{h:?}");
-        let direct = Target { method: "POST (gRPC)", url: "http://h.test:443/a.B/C", headers: &none };
-        let h = hints(&direct, "protocol", &strings(&["transport error", "connection reset"]), &json!({ "tcp": { "ok": true } }), 1000);
+        let direct = Target {
+            method: "POST (gRPC)",
+            url: "http://h.test:443/a.B/C",
+            headers: &none,
+        };
+        let h = hints(
+            &direct,
+            "protocol",
+            &strings(&["transport error", "connection reset"]),
+            &json!({ "tcp": { "ok": true } }),
+            1000,
+        );
         assert!(h.iter().any(|s| s.contains("untick Plaintext")), "{h:?}");
-        let tls = Target { method: "POST (gRPC)", url: "https://h.test:50051/a.B/C", headers: &none };
-        let h = hints(&tls, "tls", &strings(&["received corrupt message of type InvalidContentType"]), &json!({}), 1000);
+        let tls = Target {
+            method: "POST (gRPC)",
+            url: "https://h.test:50051/a.B/C",
+            headers: &none,
+        };
+        let h = hints(
+            &tls,
+            "tls",
+            &strings(&["received corrupt message of type InvalidContentType"]),
+            &json!({}),
+            1000,
+        );
         assert!(h.iter().any(|s| s.contains("Tick Plaintext")), "{h:?}");
     }
 
@@ -1085,7 +1460,10 @@ mod tests {
             &json!({ "tcp": { "ok": true, "ms": 0, "address": "127.0.0.1:80" } }),
             1000,
         );
-        assert!(!local.iter().any(|s| s.contains("under 1 ms")), "loopback is meant to be instant");
+        assert!(
+            !local.iter().any(|s| s.contains("under 1 ms")),
+            "loopback is meant to be instant"
+        );
     }
 
     #[test]
@@ -1105,7 +1483,11 @@ mod tests {
     fn a_refused_probe_names_the_refusal_when_the_client_does_not() {
         let chain = strings(&["BrokerTransportFailure (Local: Broker transport failure)"]);
         let refused = json!({ "tcp": { "ok": false, "error": "connection refused" } });
-        let t = Target { method: "METADATA (Kafka)", url: "127.0.0.1:1", headers: &HashMap::new() };
+        let t = Target {
+            method: "METADATA (Kafka)",
+            url: "127.0.0.1:1",
+            headers: &HashMap::new(),
+        };
         let h = hints(&t, "connect", &chain, &refused, 1000);
         assert!(h.iter().any(|s| s.contains("refused")), "{h:?}");
         assert!(!h.iter().any(|s| s.contains("No route")), "{h:?}");
@@ -1113,15 +1495,22 @@ mod tests {
 
     #[test]
     fn a_websocket_close_is_not_tls() {
-        let chain = strings(&["WebSocket protocol error: Connection reset without closing handshake"]);
+        let chain =
+            strings(&["WebSocket protocol error: Connection reset without closing handshake"]);
         assert_eq!(kind(&chain, false), "protocol");
         assert_eq!(kind(&strings(&["tls handshake eof"]), false), "tls");
     }
 
     #[test]
     fn keyword_connection_strings_are_redacted() {
-        assert_eq!(redact_url("host=h user=u password=s3cret dbname=d"), "host=h user=u password=••• dbname=d");
-        assert_eq!(redact_url(r"host=h password = 'a \' b' port=1"), "host=h password = ••• port=1");
+        assert_eq!(
+            redact_url("host=h user=u password=s3cret dbname=d"),
+            "host=h user=u password=••• dbname=d"
+        );
+        assert_eq!(
+            redact_url(r"host=h password = 'a \' b' port=1"),
+            "host=h password = ••• port=1"
+        );
         assert_eq!(redact_url("127.0.0.1:6379"), "127.0.0.1:6379");
     }
 }

@@ -27,7 +27,10 @@ pub fn app() -> Router {
         .nest("/api/diag", diag::routes())
         .nest("/api/grpc", grpc::routes().merge(grpc_reflect::routes()))
         // files go base64 in the JSON body, and the UI allows 25 MB of them
-        .nest("/api/http", http::routes().layer(axum::extract::DefaultBodyLimit::max(48 * 1024 * 1024)))
+        .nest(
+            "/api/http",
+            http::routes().layer(axum::extract::DefaultBodyLimit::max(48 * 1024 * 1024)),
+        )
         .nest("/api/kafka", kafka::routes())
         .nest("/api/ops", ops::routes())
         .nest("/api/pulsar", pulsar::routes())
@@ -48,10 +51,19 @@ pub async fn serve(port: u16) -> std::io::Result<()> {
     let v6 = SocketAddr::from((Ipv6Addr::LOCALHOST, port));
     let l4 = tokio::net::TcpListener::bind(v4).await?;
     let l6 = tokio::net::TcpListener::bind(v6).await?;
-    println!("conduit rust server on http://{v4} and http://[{}]:{port}", Ipv6Addr::LOCALHOST);
+    println!(
+        "conduit rust server on http://{v4} and http://[{}]:{port}",
+        Ipv6Addr::LOCALHOST
+    );
 
-    let s4 = axum::serve(l4, app().into_make_service_with_connect_info::<SocketAddr>());
-    let s6 = axum::serve(l6, app().into_make_service_with_connect_info::<SocketAddr>());
+    let s4 = axum::serve(
+        l4,
+        app().into_make_service_with_connect_info::<SocketAddr>(),
+    );
+    let s6 = axum::serve(
+        l6,
+        app().into_make_service_with_connect_info::<SocketAddr>(),
+    );
     tokio::try_join!(s4.into_future(), s6.into_future())?;
     Ok(())
 }

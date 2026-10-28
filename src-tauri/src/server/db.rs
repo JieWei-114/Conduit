@@ -220,7 +220,9 @@ async fn schema(Json(req): Json<SchemaReq>) -> Json<Value> {
                 }),
                 bytes,
             });
-            Json(json!({ "ok": true, "tables": tables, "durationMs": attempt.elapsed_ms(), "log": log }))
+            Json(
+                json!({ "ok": true, "tables": tables, "durationMs": attempt.elapsed_ms(), "log": log }),
+            )
         }
         Err(e) => fail(&attempt, &driver, &url, e).await,
     }
@@ -337,8 +339,20 @@ fn db_hints(driver: &str, raw_url: &str, chain: &[String]) -> Vec<String> {
     let all = chain.join(" | ").to_lowercase();
     // the same advice in each database's own words
     let words = match driver {
-        "postgres" => Some(("the Mozilla list", "sslmode=verify-ca", "sslrootcert", "sslmode=require", "sslmode=prefer (TLS when offered) or sslmode=disable")),
-        "mysql" => Some(("this machine's trust store", "ssl-mode=VERIFY_CA", "ssl-ca", "ssl-mode=REQUIRED", "ssl-mode=PREFERRED (TLS when offered) or ssl-mode=DISABLED")),
+        "postgres" => Some((
+            "the Mozilla list",
+            "sslmode=verify-ca",
+            "sslrootcert",
+            "sslmode=require",
+            "sslmode=prefer (TLS when offered) or sslmode=disable",
+        )),
+        "mysql" => Some((
+            "this machine's trust store",
+            "ssl-mode=VERIFY_CA",
+            "ssl-ca",
+            "ssl-mode=REQUIRED",
+            "ssl-mode=PREFERRED (TLS when offered) or ssl-mode=DISABLED",
+        )),
         _ => None,
     };
     // rustls (Postgres) and the system TLS (MySQL: macOS, OpenSSL, Windows) word these differently
@@ -346,11 +360,25 @@ fn db_hints(driver: &str, raw_url: &str, chain: &[String]) -> Vec<String> {
     if let Some((trusted, verify_ca, ca_param, require, no_tls)) = words {
         if all.contains("validity period in the certificate exceeds") {
             out.push(format!("macOS refuses server certificates valid for more than 825 days, whoever signed them (MySQL's auto-generated ones last 10 years). Use {require} to encrypt without checking, or give the server a certificate valid for 825 days or fewer."));
-        } else if has(&["not valid for name", "notvalidforname", "host name mismatch", "hostname mismatch", "target principal name is incorrect"]) {
+        } else if has(&[
+            "not valid for name",
+            "notvalidforname",
+            "host name mismatch",
+            "hostname mismatch",
+            "target principal name is incorrect",
+        ]) {
             out.push(format!("The certificate is valid but names another host: connect by the name it was issued for, or use {verify_ca} to check only who signed it."));
-        } else if has(&["invalid peer certificate", "certificate was not trusted", "certificate verify failed", "issued by an authority that is not trusted"]) {
+        } else if has(&[
+            "invalid peer certificate",
+            "certificate was not trusted",
+            "certificate verify failed",
+            "issued by an authority that is not trusted",
+        ]) {
             out.push(format!("The server's certificate is not signed by a CA Conduit trusts ({trusted}). Cloud databases (RDS, Cloud SQL, Azure) and MySQL's own auto-generated certificates sign with their own CA: download it and add {ca_param}=/path/to/ca.pem, or use {require} to encrypt without checking the certificate."));
-        } else if all.contains("server does not support tls") || all.contains("does not support ssl") || all.contains("does not have this capability") {
+        } else if all.contains("server does not support tls")
+            || all.contains("does not support ssl")
+            || all.contains("does not have this capability")
+        {
             out.push(format!("The server does not accept TLS: use {no_tls}."));
         }
     }
@@ -419,7 +447,12 @@ fn ch_parse(format: &str, lines: &[String], more: bool) -> Result<ChResult, DbEr
     if format != CH_FORMAT {
         let t = lines.join("\n");
         let t = t.trim_end_matches(['\r', '\n']);
-        return Ok(ChResult { columns: vec![], data: vec![], more, text: (!t.is_empty()).then(|| t.to_string()) });
+        return Ok(ChResult {
+            columns: vec![],
+            data: vec![],
+            more,
+            text: (!t.is_empty()).then(|| t.to_string()),
+        });
     }
     let columns: Vec<String> = lines
         .first()
@@ -429,12 +462,20 @@ fn ch_parse(format: &str, lines: &[String], more: bool) -> Result<ChResult, DbEr
     for line in lines.iter().skip(2).filter(|l| !l.trim().is_empty()) {
         // an exception after the first rows arrives as a line of text
         let Ok(Value::Array(values)) = serde_json::from_str::<Value>(line) else {
-            return Err(DbErr { server: true, ..DbErr::msg("query", vec![line.trim().to_string()]) });
+            return Err(DbErr {
+                server: true,
+                ..DbErr::msg("query", vec![line.trim().to_string()])
+            });
         };
         let row: serde_json::Map<String, Value> = columns.iter().cloned().zip(values).collect();
         data.push(Value::Object(row));
     }
-    Ok(ChResult { columns, data, more, text: None })
+    Ok(ChResult {
+        columns,
+        data,
+        more,
+        text: None,
+    })
 }
 
 /// A text answer as rows of one `text` column, a line each.
@@ -454,7 +495,10 @@ fn ch_text_out(text: &str, more: bool) -> Out {
 
 /// Up to `max_lines` lines of `resp`'s body and at most [`CH_BYTES_MAX`] bytes, and whether
 /// there was more. The rest is never read: dropping the response closes the connection.
-async fn ch_lines(resp: reqwest::Response, max_lines: usize) -> Result<(Vec<String>, bool), reqwest::Error> {
+async fn ch_lines(
+    resp: reqwest::Response,
+    max_lines: usize,
+) -> Result<(Vec<String>, bool), reqwest::Error> {
     let mut stream = resp.bytes_stream();
     let mut buf: Vec<u8> = Vec::new();
     let mut lines: Vec<String> = Vec::new();
@@ -487,7 +531,11 @@ fn ch_error_text(lines: &[String]) -> String {
         .iter()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && *l != "[]")
-        .map(|l| serde_json::from_str::<Vec<String>>(l).map(|v| v.join(" ")).unwrap_or_else(|_| l.to_string()))
+        .map(|l| {
+            serde_json::from_str::<Vec<String>>(l)
+                .map(|v| v.join(" "))
+                .unwrap_or_else(|_| l.to_string())
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -496,17 +544,28 @@ async fn ch_query(raw_url: &str, sql: &str, max_rows: usize) -> Result<ChResult,
     let mut u = Url::parse(raw_url).map_err(|e| DbErr::input(attempt::describe(&e)))?;
     let db = {
         let p = u.path().trim_start_matches('/');
-        if p.is_empty() { "default".to_string() } else { p.to_string() }
+        if p.is_empty() {
+            "default".to_string()
+        } else {
+            p.to_string()
+        }
     };
     let user = {
         let s = urldec(u.username());
-        if s.is_empty() { "default".to_string() } else { s }
+        if s.is_empty() {
+            "default".to_string()
+        } else {
+            s
+        }
     };
     let pass = u.password().map(urldec).unwrap_or_default();
     let _ = u.set_username("");
     let _ = u.set_password(None);
     let origin = u.origin().ascii_serialization();
-    let endpoint = format!("{origin}/?database={}&default_format={CH_FORMAT}", urlenc(&db));
+    let endpoint = format!(
+        "{origin}/?database={}&default_format={CH_FORMAT}",
+        urlenc(&db)
+    );
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -516,8 +575,12 @@ async fn ch_query(raw_url: &str, sql: &str, max_rows: usize) -> Result<ChResult,
 
     let net = |stage: &'static str, e: reqwest::Error| DbErr {
         timed_out: e.is_timeout(),
-        timeout_ms: if e.is_connect() { CONNECT_TIMEOUT } else { QUERY_TIMEOUT }.as_millis()
-            as u64,
+        timeout_ms: if e.is_connect() {
+            CONNECT_TIMEOUT
+        } else {
+            QUERY_TIMEOUT
+        }
+        .as_millis() as u64,
         ..DbErr::of(stage, &e.without_url())
     };
     let resp = client
@@ -544,10 +607,15 @@ async fn ch_query(raw_url: &str, sql: &str, max_rows: usize) -> Result<ChResult,
         if !t.is_empty() {
             chain.push(t.to_string());
         }
-        return Err(DbErr { server: true, ..DbErr::msg("query", chain) });
+        return Err(DbErr {
+            server: true,
+            ..DbErr::msg("query", chain)
+        });
     }
     // names, types, and one row past the cap so a cut shows
-    let (lines, more) = ch_lines(resp, max_rows + 3).await.map_err(|e| net("body", e))?;
+    let (lines, more) = ch_lines(resp, max_rows + 3)
+        .await
+        .map_err(|e| net("body", e))?;
     ch_parse(&format, &lines, more)
 }
 
@@ -622,12 +690,18 @@ fn pg_target(raw: &str) -> Result<PgTarget, String> {
                 let mut kept = Vec::new();
                 for pair in query.split('&').filter(|p| !p.is_empty()) {
                     let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-                    let v = percent_encoding::percent_decode_str(v).decode_utf8_lossy().into_owned();
+                    let v = percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into_owned();
                     if !take(k, v)? {
                         kept.push(pair);
                     }
                 }
-                if kept.is_empty() { base.to_string() } else { format!("{base}?{}", kept.join("&")) }
+                if kept.is_empty() {
+                    base.to_string()
+                } else {
+                    format!("{base}?{}", kept.join("&"))
+                }
             }
         }
     } else {
@@ -657,7 +731,11 @@ fn pg_target(raw: &str) -> Result<PgTarget, String> {
     } else {
         format!("{conn}?sslmode={mode}")
     };
-    Ok(PgTarget { conn, tls, root_cert })
+    Ok(PgTarget {
+        conn,
+        tls,
+        root_cert,
+    })
 }
 
 /// The `key=value` pairs of a libpq keyword string (`host=h dbname='my db'`): key, unquoted value,
@@ -737,27 +815,41 @@ fn pg_tls(target: &PgTarget) -> Result<tokio_postgres_rustls::MakeRustlsConnect,
                     .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
                     .map_err(|e| e.to_string())
             };
-            let certs = read(path).map_err(|e| DbErr::input(format!("sslrootcert={path} could not be read as PEM certificates: {e}")))?;
+            let certs = read(path).map_err(|e| {
+                DbErr::input(format!(
+                    "sslrootcert={path} could not be read as PEM certificates: {e}"
+                ))
+            })?;
             if certs.is_empty() {
-                return Err(DbErr::input(format!("sslrootcert={path} holds no PEM certificate")));
+                return Err(DbErr::input(format!(
+                    "sslrootcert={path} holds no PEM certificate"
+                )));
             }
             for c in certs {
-                roots
-                    .add(c)
-                    .map_err(|e| DbErr::input(format!("a certificate in sslrootcert={path} is not usable: {e}")))?;
+                roots.add(c).map_err(|e| {
+                    DbErr::input(format!(
+                        "a certificate in sslrootcert={path} is not usable: {e}"
+                    ))
+                })?;
             }
         }
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let tls_err = |e: rustls::Error| DbErr::input(format!("TLS could not be set up: {e}"));
-    let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
-        .build()
-        .map_err(|e| DbErr::input(format!("TLS could not be set up: {e}")))?;
+    let inner = rustls::client::WebPkiServerVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()
+    .map_err(|e| DbErr::input(format!("TLS could not be set up: {e}")))?;
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(tls_err)?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PgVerifier { tls: target.tls, inner }))
+        .with_custom_certificate_verifier(Arc::new(PgVerifier {
+            tls: target.tls,
+            inner,
+        }))
         .with_no_client_auth();
     Ok(tokio_postgres_rustls::MakeRustlsConnect::new(config))
 }
@@ -782,11 +874,20 @@ impl rustls::client::danger::ServerCertVerifier for PgVerifier {
         use rustls::client::danger::ServerCertVerified;
         use rustls::CertificateError::{NotValidForName, NotValidForNameContext};
         match self.tls {
-            PgTls::VerifyFull => self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp, now),
-            PgTls::VerifyCa => match self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp, now) {
-                Err(rustls::Error::InvalidCertificate(NotValidForName | NotValidForNameContext { .. })) => {
-                    Ok(ServerCertVerified::assertion())
-                }
+            PgTls::VerifyFull => {
+                self.inner
+                    .verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+            }
+            PgTls::VerifyCa => match self.inner.verify_server_cert(
+                end_entity,
+                intermediates,
+                server_name,
+                ocsp,
+                now,
+            ) {
+                Err(rustls::Error::InvalidCertificate(
+                    NotValidForName | NotValidForNameContext { .. },
+                )) => Ok(ServerCertVerified::assertion()),
                 other => other,
             },
             PgTls::Disable | PgTls::Prefer | PgTls::Require => Ok(ServerCertVerified::assertion()),
@@ -873,7 +974,12 @@ fn add_causes(chain: &mut Vec<String>, more: Vec<String>) {
 
 /// Asks Postgres to cancel the running statement if dropped while armed: a query stopped by
 /// [`within`] would otherwise keep running on the server after its connection is gone.
-struct PgCancel(Option<(tokio_postgres::CancelToken, tokio_postgres_rustls::MakeRustlsConnect)>);
+struct PgCancel(
+    Option<(
+        tokio_postgres::CancelToken,
+        tokio_postgres_rustls::MakeRustlsConnect,
+    )>,
+);
 
 impl PgCancel {
     fn disarm(mut self) {
@@ -903,7 +1009,11 @@ async fn pg_connect(url: &str) -> Result<Pg, DbErr> {
         Ok(Ok(pair)) => pair,
     };
     let conn = tokio::spawn(connection);
-    Ok(Pg { client, tls, conn: Some(conn) })
+    Ok(Pg {
+        client,
+        tls,
+        conn: Some(conn),
+    })
 }
 
 async fn pg_schema(url: &str) -> Result<Vec<String>, DbErr> {
@@ -939,7 +1049,10 @@ async fn pg_run(url: &str, query: &str) -> Result<Out, DbErr> {
 
 /// Runs `query` and reads at most [`ROWS_MAX`] + 1 rows; the rest are never read (the
 /// connection is closed when the caller drops it).
-async fn pg_rows(client: &tokio_postgres::Client, query: &str) -> Result<Out, tokio_postgres::Error> {
+async fn pg_rows(
+    client: &tokio_postgres::Client,
+    query: &str,
+) -> Result<Out, tokio_postgres::Error> {
     let stmt = client.prepare(query).await?;
     if stmt.columns().is_empty() {
         // INSERT / UPDATE / DELETE / DDL without RETURNING: report what it touched
@@ -947,7 +1060,10 @@ async fn pg_rows(client: &tokio_postgres::Client, query: &str) -> Result<Out, to
     }
     let names = unique_names(stmt.columns().iter().map(|c| c.name().to_string()));
     let stream = client
-        .query_raw(&stmt, std::iter::empty::<&dyn tokio_postgres::types::ToSql>())
+        .query_raw(
+            &stmt,
+            std::iter::empty::<&dyn tokio_postgres::types::ToSql>(),
+        )
         .await?;
     futures_util::pin_mut!(stream);
     let mut rows = Vec::new();
@@ -1231,7 +1347,8 @@ fn my_err(stage: &'static str, e: &mysql_async::Error) -> DbErr {
     let mut d = DbErr::of(stage, e);
     if let mysql_async::Error::Server(s) = e {
         d.server = true;
-        d.hints.push(format!("MySQL error {} (SQLSTATE {})", s.code, s.state));
+        d.hints
+            .push(format!("MySQL error {} (SQLSTATE {})", s.code, s.state));
     }
     d
 }
@@ -1261,7 +1378,11 @@ struct MyTarget {
 fn my_target(raw: &str) -> Result<MyTarget, String> {
     let Ok(mut url) = Url::parse(raw) else {
         // mysql_async names what is wrong with it
-        return Ok(MyTarget { url: raw.to_string(), tls: Some(MyTls::Preferred), ca: None });
+        return Ok(MyTarget {
+            url: raw.to_string(),
+            tls: Some(MyTls::Preferred),
+            ca: None,
+        });
     };
     let mut mode = None;
     let mut ca = None;
@@ -1295,12 +1416,20 @@ fn my_target(raw: &str) -> Result<MyTarget, String> {
     } else {
         url.query_pairs_mut().clear().extend_pairs(kept);
     }
-    let mut tls = if own { None } else { Some(mode.unwrap_or(MyTls::Preferred)) };
+    let mut tls = if own {
+        None
+    } else {
+        Some(mode.unwrap_or(MyTls::Preferred))
+    };
     // the mysql client: a CA file with the default or REQUIRED mode checks the chain
     if ca.is_some() && matches!(tls, Some(MyTls::Preferred | MyTls::Required)) {
         tls = Some(MyTls::VerifyCa);
     }
-    Ok(MyTarget { url: url.to_string(), tls, ca })
+    Ok(MyTarget {
+        url: url.to_string(),
+        tls,
+        ca,
+    })
 }
 
 /// How a connection asks for TLS: `None` for none at all.
@@ -1320,19 +1449,29 @@ fn my_ssl(tls: MyTls, ca: Option<&str>) -> Option<mysql_async::SslOpts> {
 
 async fn my_conn(url: &str) -> Result<mysql_async::Conn, DbErr> {
     let target = my_target(url).map_err(DbErr::input)?;
-    let base = mysql_async::Opts::from_url(&target.url).map_err(|e| DbErr::input(attempt::describe(&e)))?;
+    let base = mysql_async::Opts::from_url(&target.url)
+        .map_err(|e| DbErr::input(attempt::describe(&e)))?;
     let Some(tls) = target.tls else {
         return my_connect(base).await;
     };
     if let Some(path) = target.ca.as_deref() {
         if let Err(e) = std::fs::metadata(path) {
-            return Err(DbErr::input(format!("ssl-ca={path} could not be read: {e}")));
+            return Err(DbErr::input(format!(
+                "ssl-ca={path} could not be read: {e}"
+            )));
         }
     }
-    let with = |ssl| mysql_async::Opts::from(mysql_async::OptsBuilder::from_opts(base.clone()).ssl_opts(ssl));
+    let with = |ssl| {
+        mysql_async::Opts::from(mysql_async::OptsBuilder::from_opts(base.clone()).ssl_opts(ssl))
+    };
     match my_connect(with(my_ssl(tls, target.ca.as_deref()))).await {
         // PREFERRED: a server without TLS is reached in plaintext, as the mysql client does
-        Err(e) if tls == MyTls::Preferred && e.chain.iter().any(|c| c.contains("does not have this capability")) => {
+        Err(e)
+            if tls == MyTls::Preferred
+                && e.chain
+                    .iter()
+                    .any(|c| c.contains("does not have this capability")) =>
+        {
             my_connect(with(None)).await
         }
         r => r,
@@ -1484,10 +1623,22 @@ fn mongo_text(e: &mongodb::error::Error) -> String {
     match e.kind.as_ref() {
         ErrorKind::Command(c) => format!("{} ({}): {}", c.code_name, c.code, c.message),
         ErrorKind::Write(WriteFailure::WriteError(w)) => {
-            format!("{} ({}): {}", w.code_name.as_deref().unwrap_or("WriteError"), w.code, w.message)
+            format!(
+                "{} ({}): {}",
+                w.code_name.as_deref().unwrap_or("WriteError"),
+                w.code,
+                w.message
+            )
         }
-        ErrorKind::Write(WriteFailure::WriteConcernError(w)) => format!("{} ({}): {}", w.code_name, w.code, w.message),
-        ErrorKind::ServerSelection { message, .. } => message.split(" Topology:").next().unwrap_or(message).trim_end_matches('.').to_string(),
+        ErrorKind::Write(WriteFailure::WriteConcernError(w)) => {
+            format!("{} ({}): {}", w.code_name, w.code, w.message)
+        }
+        ErrorKind::ServerSelection { message, .. } => message
+            .split(" Topology:")
+            .next()
+            .unwrap_or(message)
+            .trim_end_matches('.')
+            .to_string(),
         other => mongo_clean(&other.to_string()),
     }
 }
@@ -1501,7 +1652,9 @@ fn mongo_clean(text: &str) -> String {
 
 /// The servers a server-selection message describes: each address with its error, or its type.
 fn mongo_servers(message: &str) -> Vec<(String, String)> {
-    let Some(topology) = message.split_once(" Topology:").map(|(_, t)| t) else { return vec![] };
+    let Some(topology) = message.split_once(" Topology:").map(|(_, t)| t) else {
+        return vec![];
+    };
     topology
         .split("{ Address: ")
         .skip(1)
@@ -1526,7 +1679,13 @@ fn mongo_hosts(url: &str) -> Vec<String> {
     let rest = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
     rest.split(',')
         .filter(|h| !h.is_empty())
-        .map(|h| if h.contains(':') && !h.ends_with(']') { h.to_lowercase() } else { format!("{}:27017", h.to_lowercase()) })
+        .map(|h| {
+            if h.contains(':') && !h.ends_with(']') {
+                h.to_lowercase()
+            } else {
+                format!("{}:27017", h.to_lowercase())
+            }
+        })
         .collect()
 }
 
@@ -1560,10 +1719,13 @@ fn mongo_err(stage: &'static str, e: &mongodb::error::Error, url: &str) -> DbErr
     }
     let mut d = DbErr::msg(stage, attempt::tidy(chain));
     match e.kind.as_ref() {
-        ErrorKind::Command(_) | ErrorKind::Write(_) | ErrorKind::Authentication { .. } => d.server = true,
+        ErrorKind::Command(_) | ErrorKind::Write(_) | ErrorKind::Authentication { .. } => {
+            d.server = true
+        }
         ErrorKind::ServerSelection { message, .. } => {
             let servers = mongo_servers(message);
-            d.chain.extend(servers.iter().map(|(addr, said)| format!("{addr}: {said}")));
+            d.chain
+                .extend(servers.iter().map(|(addr, said)| format!("{addr}: {said}")));
             d.timeout_ms = mongo_select_timeout(url).as_millis() as u64;
             d.hints.push(format!(
                 "MongoDB found no usable server within {} ms; the cause above says why.",
@@ -1575,7 +1737,10 @@ fn mongo_err(stage: &'static str, e: &mongodb::error::Error, url: &str) -> DbErr
                 .map(|(a, _)| a.as_str())
                 .filter(|a| !given.contains(&a.to_lowercase()))
                 .collect();
-            if !advertised.is_empty() && !url.starts_with("mongodb+srv") && mongo_option(url, "directConnection").is_none() {
+            if !advertised.is_empty()
+                && !url.starts_with("mongodb+srv")
+                && mongo_option(url, "directConnection").is_none()
+            {
                 d.hints.push(format!(
                     "The server answered, but as a replica set whose members it names {}, which this machine cannot reach: add directConnection=true to the URL to talk only to the host you gave.",
                     advertised.join(", ")
@@ -1592,7 +1757,8 @@ async fn mongo_db(url: &str) -> Result<mongodb::Database, DbErr> {
         .await
         .map_err(|e| mongo_err("connect", &e, url))?;
     let db_name = opts.default_database.clone();
-    opts.server_selection_timeout.get_or_insert(MONGO_SELECT_TIMEOUT);
+    opts.server_selection_timeout
+        .get_or_insert(MONGO_SELECT_TIMEOUT);
     opts.connect_timeout.get_or_insert(CONNECT_TIMEOUT);
     let client = mongodb::Client::with_options(opts).map_err(|e| mongo_err("connect", &e, url))?;
     let name = db_name.unwrap_or_else(|| "test".to_string());
@@ -1680,7 +1846,11 @@ async fn mongo_run(url: &str, query: &str) -> Result<Out, DbErr> {
             .aggregate(stages)
             .await
             .map_err(|e| mongo_err("query", &e, url))?;
-        while let Some(d) = cursor.try_next().await.map_err(|e| mongo_err("query", &e, url))? {
+        while let Some(d) = cursor
+            .try_next()
+            .await
+            .map_err(|e| mongo_err("query", &e, url))?
+        {
             docs.push(bson_to_json(d));
         }
     } else {
@@ -1696,7 +1866,11 @@ async fn mongo_run(url: &str, query: &str) -> Result<Out, DbErr> {
             find = find.sort(to_doc(sort)?);
         }
         let mut cursor = find.await.map_err(|e| mongo_err("query", &e, url))?;
-        while let Some(d) = cursor.try_next().await.map_err(|e| mongo_err("query", &e, url))? {
+        while let Some(d) = cursor
+            .try_next()
+            .await
+            .map_err(|e| mongo_err("query", &e, url))?
+        {
             docs.push(bson_to_json(d));
         }
     }
@@ -1783,7 +1957,10 @@ mod tests {
 
     #[test]
     fn numeric_is_exact_text() {
-        assert_eq!(pg_numeric(&numeric(1, 0, 3, &[1, 2345, 6780])).unwrap(), "12345.678");
+        assert_eq!(
+            pg_numeric(&numeric(1, 0, 3, &[1, 2345, 6780])).unwrap(),
+            "12345.678"
+        );
         assert_eq!(pg_numeric(&numeric(-1, 0, 4, &[1])).unwrap(), "0.0001");
         assert_eq!(pg_numeric(&numeric(-2, 0, 5, &[1000])).unwrap(), "0.00001");
         assert_eq!(pg_numeric(&numeric(0, 0x4000, 0, &[42])).unwrap(), "-42");
@@ -1834,15 +2011,27 @@ mod tests {
         }
         let got = pg_array(&v, |b| pg_value(&Type::INT4, b)).unwrap();
         assert_eq!(got, json!([[1, null], [3, 4]]));
-        assert_eq!(pg_array(&0i32.to_be_bytes(), |_| Value::Null).unwrap(), json!([]));
+        assert_eq!(
+            pg_array(&0i32.to_be_bytes(), |_| Value::Null).unwrap(),
+            json!([])
+        );
         assert!(pg_array(&v[..v.len() - 2], |_| Value::Null).is_err());
     }
 
     #[test]
     fn values_without_a_decoder_say_so() {
-        assert_eq!(pg_value(&Type::POINT, &[0; 16]), json!("<unsupported type point>"));
-        assert_eq!(pg_value(&Type::FLOAT8, &f64::NAN.to_be_bytes()), json!("NaN"));
-        assert_eq!(pg_value(&Type::DATE, &i32::MAX.to_be_bytes()), json!("infinity"));
+        assert_eq!(
+            pg_value(&Type::POINT, &[0; 16]),
+            json!("<unsupported type point>")
+        );
+        assert_eq!(
+            pg_value(&Type::FLOAT8, &f64::NAN.to_be_bytes()),
+            json!("NaN")
+        );
+        assert_eq!(
+            pg_value(&Type::DATE, &i32::MAX.to_be_bytes()),
+            json!("infinity")
+        );
         assert_eq!(pg_value(&Type::TEXT, b"hi"), json!("hi"));
     }
 
@@ -1852,25 +2041,54 @@ mod tests {
         assert_eq!(
             mongo_servers(message),
             vec![
-                ("mongo1:27017".to_string(), "An error occurred during DNS resolution: no record found".to_string()),
+                (
+                    "mongo1:27017".to_string(),
+                    "An error occurred during DNS resolution: no record found".to_string()
+                ),
                 ("localhost:27017".to_string(), "RSSecondary".to_string()),
             ]
         );
-        assert_eq!(mongo_hosts("mongodb://u:p@LocalHost,h2:27018/db?x=1"), vec!["localhost:27017", "h2:27018"]);
-        assert_eq!(mongo_select_timeout("mongodb://h/?serverSelectionTimeoutMS=3000"), Duration::from_millis(3000));
+        assert_eq!(
+            mongo_hosts("mongodb://u:p@LocalHost,h2:27018/db?x=1"),
+            vec!["localhost:27017", "h2:27018"]
+        );
+        assert_eq!(
+            mongo_select_timeout("mongodb://h/?serverSelectionTimeoutMS=3000"),
+            Duration::from_millis(3000)
+        );
         assert_eq!(mongo_select_timeout("mongodb://h/"), MONGO_SELECT_TIMEOUT);
-        assert_eq!(mongo_option("mongodb://h/?directconnection=true", "directConnection").as_deref(), Some("true"));
-        assert_eq!(mongo_clean("Kind: I/O error: Connection refused (os error 61), labels: {}"), "I/O error: Connection refused (os error 61)");
+        assert_eq!(
+            mongo_option("mongodb://h/?directconnection=true", "directConnection").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            mongo_clean("Kind: I/O error: Connection refused (os error 61), labels: {}"),
+            "I/O error: Connection refused (os error 61)"
+        );
     }
 
     #[tokio::test]
     async fn mongo_honours_the_urls_own_selection_timeout() {
         let t0 = std::time::Instant::now();
-        let e = mongo_schema("mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=300&connectTimeoutMS=200").await.expect_err("nothing listens");
+        let e = mongo_schema(
+            "mongodb://127.0.0.1:9/?serverSelectionTimeoutMS=300&connectTimeoutMS=200",
+        )
+        .await
+        .expect_err("nothing listens");
         assert!(t0.elapsed() < Duration::from_secs(3), "{:?}", t0.elapsed());
         assert_eq!(e.timeout_ms, 300);
-        assert!(e.chain.iter().all(|c| !c.contains("labels:") && !c.contains("Kind:")), "{:?}", e.chain);
-        assert!(e.chain.iter().any(|c| c.starts_with("127.0.0.1:9: ")), "{:?}", e.chain);
+        assert!(
+            e.chain
+                .iter()
+                .all(|c| !c.contains("labels:") && !c.contains("Kind:")),
+            "{:?}",
+            e.chain
+        );
+        assert!(
+            e.chain.iter().any(|c| c.starts_with("127.0.0.1:9: ")),
+            "{:?}",
+            e.chain
+        );
     }
 
     #[test]
@@ -1898,20 +2116,27 @@ mod tests {
         // Act
         let t = pg_target(url).unwrap();
         // Assert
-        assert_eq!(t.conn, "postgres://u:p@h:5432/db?application_name=x&sslmode=require");
+        assert_eq!(
+            t.conn,
+            "postgres://u:p@h:5432/db?application_name=x&sslmode=require"
+        );
         assert_eq!(t.tls, PgTls::VerifyFull);
         assert_eq!(t.root_cert.as_deref(), Some("/tmp/ca.pem"));
 
         let t = pg_target("postgres://h/db?sslmode=disable").unwrap();
         // disable must reach tokio-postgres, or it would offer TLS anyway
-        assert_eq!((t.conn.as_str(), t.tls), ("postgres://h/db?sslmode=disable", PgTls::Disable));
+        assert_eq!(
+            (t.conn.as_str(), t.tls),
+            ("postgres://h/db?sslmode=disable", PgTls::Disable)
+        );
         assert_eq!(pg_target("postgres://h/db").unwrap().tls, PgTls::Prefer);
         assert!(pg_target("postgres://h/db?sslmode=bogus").is_err());
     }
 
     #[test]
     fn keyword_strings_keep_quoted_values() {
-        let t = pg_target(r"host=h dbname='my \'db' sslmode = require sslrootcert='/a b/ca.pem'").unwrap();
+        let t = pg_target(r"host=h dbname='my \'db' sslmode = require sslrootcert='/a b/ca.pem'")
+            .unwrap();
         assert_eq!(t.conn, r"host=h dbname='my \'db' sslmode=require");
         // a root certificate turns require into verify-ca, as libpq does
         assert_eq!(t.tls, PgTls::VerifyCa);
@@ -1925,7 +2150,11 @@ mod tests {
         let t = pg_target("postgres://h/db?sslrootcert=/nonexistent/ca.pem").unwrap();
         let e = pg_tls(&t).err().expect("refused");
         assert!(!e.sent);
-        assert!(e.chain[0].contains("sslrootcert=/nonexistent/ca.pem"), "{:?}", e.chain);
+        assert!(
+            e.chain[0].contains("sslrootcert=/nonexistent/ca.pem"),
+            "{:?}",
+            e.chain
+        );
     }
 
     #[test]
@@ -1939,13 +2168,25 @@ mod tests {
         assert_eq!(t.tls, Some(MyTls::VerifyIdentity));
         assert_eq!(t.ca.as_deref(), Some("/tmp/ca.pem"));
 
-        assert_eq!(my_target("mysql://h/db").unwrap().tls, Some(MyTls::Preferred));
-        assert_eq!(my_target("mysql://h/db?sslMode=DISABLED").unwrap().tls, Some(MyTls::Disabled));
+        assert_eq!(
+            my_target("mysql://h/db").unwrap().tls,
+            Some(MyTls::Preferred)
+        );
+        assert_eq!(
+            my_target("mysql://h/db?sslMode=DISABLED").unwrap().tls,
+            Some(MyTls::Disabled)
+        );
         // a CA file with the default mode checks the chain, as the mysql client does
-        assert_eq!(my_target("mysql://h/db?ssl-ca=/c.pem").unwrap().tls, Some(MyTls::VerifyCa));
+        assert_eq!(
+            my_target("mysql://h/db?ssl-ca=/c.pem").unwrap().tls,
+            Some(MyTls::VerifyCa)
+        );
         // mysql_async's own parameters are left to it
         let own = my_target("mysql://h/db?require_ssl=true").unwrap();
-        assert_eq!((own.url.as_str(), own.tls), ("mysql://h/db?require_ssl=true", None));
+        assert_eq!(
+            (own.url.as_str(), own.tls),
+            ("mysql://h/db?require_ssl=true", None)
+        );
         assert!(my_target("mysql://h/db?require_ssl=true&ssl-mode=REQUIRED").is_err());
         assert!(my_target("mysql://h/db?ssl-mode=SOMETIMES").is_err());
     }
@@ -1956,26 +2197,60 @@ mod tests {
         let req = my_ssl(MyTls::Required, None).unwrap();
         assert!(req.accept_invalid_certs());
         let ca = my_ssl(MyTls::VerifyCa, Some("/c.pem")).unwrap();
-        assert!(!ca.accept_invalid_certs() && ca.skip_domain_validation() && ca.root_certs().len() == 1);
+        assert!(
+            !ca.accept_invalid_certs() && ca.skip_domain_validation() && ca.root_certs().len() == 1
+        );
         let full = my_ssl(MyTls::VerifyIdentity, None).unwrap();
         assert!(!full.accept_invalid_certs() && !full.skip_domain_validation());
     }
 
     #[test]
     fn tls_failures_are_hinted() {
-        let h = db_hints("mysql", "mysql://h/db", &["TLS error: `The certificate was not trusted.'".into()]);
+        let h = db_hints(
+            "mysql",
+            "mysql://h/db",
+            &["TLS error: `The certificate was not trusted.'".into()],
+        );
         assert!(h[0].contains("ssl-ca="), "{h:?}");
-        let h = db_hints("mysql", "mysql://h/db", &["TLS error: `A host name mismatch has occurred.'".into()]);
+        let h = db_hints(
+            "mysql",
+            "mysql://h/db",
+            &["TLS error: `A host name mismatch has occurred.'".into()],
+        );
         assert!(h[0].contains("ssl-mode=VERIFY_CA"), "{h:?}");
-        let h = db_hints("mysql", "mysql://h/db", &["TLS error: `The validity period in the certificate exceeds the maximum allowed.'".into()]);
+        let h = db_hints(
+            "mysql",
+            "mysql://h/db",
+            &[
+                "TLS error: `The validity period in the certificate exceeds the maximum allowed.'"
+                    .into(),
+            ],
+        );
         assert!(h[0].contains("825 days"), "{h:?}");
-        let h = db_hints("postgres", "postgres://h/db?sslmode=verify-full", &["invalid peer certificate: UnknownIssuer".into()]);
+        let h = db_hints(
+            "postgres",
+            "postgres://h/db?sslmode=verify-full",
+            &["invalid peer certificate: UnknownIssuer".into()],
+        );
         assert!(h[0].contains("sslrootcert"), "{h:?}");
-        let h = db_hints("postgres", "postgres://h/db?sslmode=verify-full", &["invalid peer certificate: certificate not valid for name \"127.0.0.1\"".into()]);
+        let h = db_hints(
+            "postgres",
+            "postgres://h/db?sslmode=verify-full",
+            &["invalid peer certificate: certificate not valid for name \"127.0.0.1\"".into()],
+        );
         assert!(h[0].contains("names another host"), "{h:?}");
         // a root certificate file that cannot be read is said by the error itself
-        assert!(db_hints("postgres", "postgres://h/db", &["sslrootcert=/x could not be read as PEM certificates".into()]).is_empty());
-        let h = db_hints("postgres", "postgres://h/db?sslmode=require", &["error performing TLS handshake: server does not support TLS".into()]);
+        assert!(db_hints(
+            "postgres",
+            "postgres://h/db",
+            &["sslrootcert=/x could not be read as PEM certificates".into()]
+        )
+        .is_empty());
+        let h = db_hints(
+            "postgres",
+            "postgres://h/db?sslmode=require",
+            &["error performing TLS handshake: server does not support TLS".into()],
+        );
         assert!(h[0].contains("does not accept TLS"), "{h:?}");
         let h = db_hints("mysql", "mysql://h", &["Access denied for user".into()]);
         assert!(h[0].contains("credentials"), "{h:?}");
@@ -1984,22 +2259,69 @@ mod tests {
     #[test]
     fn clickhouse_rows_and_text_formats_are_kept() {
         let lines = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let j = ch_parse(CH_FORMAT, &lines(&[r#"["a","b"]"#, r#"["UInt8","String"]"#, r#"[1,"x"]"#]), false).ok().unwrap();
-        assert_eq!((j.columns.clone(), j.data.clone(), j.text), (vec!["a".to_string(), "b".to_string()], vec![json!({"a": 1, "b": "x"})], None));
-        let csv = ch_parse("CSV", &lines(&["1,\"x\"", "2,\"y\""]), false).ok().unwrap();
+        let j = ch_parse(
+            CH_FORMAT,
+            &lines(&[r#"["a","b"]"#, r#"["UInt8","String"]"#, r#"[1,"x"]"#]),
+            false,
+        )
+        .ok()
+        .unwrap();
+        assert_eq!(
+            (j.columns.clone(), j.data.clone(), j.text),
+            (
+                vec!["a".to_string(), "b".to_string()],
+                vec![json!({"a": 1, "b": "x"})],
+                None
+            )
+        );
+        let csv = ch_parse("CSV", &lines(&["1,\"x\"", "2,\"y\""]), false)
+            .ok()
+            .unwrap();
         assert_eq!(csv.text.as_deref(), Some("1,\"x\"\n2,\"y\""));
         assert_eq!(ch_parse("CSV", &[], false).ok().unwrap().text, None);
-        let broken = ch_parse(CH_FORMAT, &lines(&[r#"["a"]"#, r#"["UInt8"]"#, "[1]", "Code: 241. DB::Exception: Memory limit exceeded"]), false);
+        let broken = ch_parse(
+            CH_FORMAT,
+            &lines(&[
+                r#"["a"]"#,
+                r#"["UInt8"]"#,
+                "[1]",
+                "Code: 241. DB::Exception: Memory limit exceeded",
+            ]),
+            false,
+        );
         let e = broken.err().expect("an exception mid-stream is an error");
-        assert!(e.server && e.chain[0].contains("Code: 241"), "{:?}", e.chain);
-        assert_eq!(ch_error_text(&lines(&["[]", "[]", r#"["Code: 62. DB::Exception: Syntax error"]"#])), "Code: 62. DB::Exception: Syntax error");
-        assert_eq!(ch_error_text(&lines(&["Code: 516. Authentication failed"])), "Code: 516. Authentication failed");
+        assert!(
+            e.server && e.chain[0].contains("Code: 241"),
+            "{:?}",
+            e.chain
+        );
+        assert_eq!(
+            ch_error_text(&lines(&[
+                "[]",
+                "[]",
+                r#"["Code: 62. DB::Exception: Syntax error"]"#
+            ])),
+            "Code: 62. DB::Exception: Syntax error"
+        );
+        assert_eq!(
+            ch_error_text(&lines(&["Code: 516. Authentication failed"])),
+            "Code: 516. Authentication failed"
+        );
         let out = ch_text_out("1,x\n2,y", false);
         assert_eq!(out.columns, vec!["text"]);
-        assert_eq!(out.rows, vec![json!({"text": "1,x"}), json!({"text": "2,y"})]);
-        let many = (0..ROWS_MAX + 7).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        assert_eq!(
+            out.rows,
+            vec![json!({"text": "1,x"}), json!({"text": "2,y"})]
+        );
+        let many = (0..ROWS_MAX + 7)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let out = ch_text_out(&many, false);
-        assert_eq!((out.row_count, out.truncated, out.total), (ROWS_MAX as u64, true, Some(ROWS_MAX as u64 + 7)));
+        assert_eq!(
+            (out.row_count, out.truncated, out.total),
+            (ROWS_MAX as u64, true, Some(ROWS_MAX as u64 + 7))
+        );
         assert!(ch_text_out("1", true).truncated);
     }
 
@@ -2010,14 +2332,30 @@ mod tests {
         let app = axum::Router::new().route(
             "/",
             axum::routing::post(|| async {
-                let head = futures_util::stream::iter([Ok::<_, std::io::Error>(b"[\"n\"]\n[\"UInt64\"]\n".to_vec())]);
-                let rows = futures_util::stream::iter((0..1_000_000u64).map(|i| Ok(format!("[{i}]\n").into_bytes())));
-                ([("x-clickhouse-format", CH_FORMAT)], axum::body::Body::from_stream(head.chain(rows)))
+                let head = futures_util::stream::iter([Ok::<_, std::io::Error>(
+                    b"[\"n\"]\n[\"UInt64\"]\n".to_vec(),
+                )]);
+                let rows = futures_util::stream::iter(
+                    (0..1_000_000u64).map(|i| Ok(format!("[{i}]\n").into_bytes())),
+                );
+                (
+                    [("x-clickhouse-format", CH_FORMAT)],
+                    axum::body::Body::from_stream(head.chain(rows)),
+                )
             }),
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let out = ch_run(&format!("http://{addr}/"), "select number from numbers(1000000)").await.ok().unwrap();
-        assert_eq!((out.row_count, out.truncated, out.total), (ROWS_MAX as u64, true, None));
+        let out = ch_run(
+            &format!("http://{addr}/"),
+            "select number from numbers(1000000)",
+        )
+        .await
+        .ok()
+        .unwrap();
+        assert_eq!(
+            (out.row_count, out.truncated, out.total),
+            (ROWS_MAX as u64, true, None)
+        );
         assert_eq!(out.rows[0], json!({ "n": 0 }));
     }
 
@@ -2027,13 +2365,22 @@ mod tests {
         let out = Out::capped(vec!["i".into()], rows(3));
         assert_eq!((out.row_count, out.truncated), (3, false));
         let out = Out::capped(vec!["i".into()], rows(ROWS_MAX + 1));
-        assert_eq!((out.row_count, out.truncated, out.rows.len()), (ROWS_MAX as u64, true, ROWS_MAX));
+        assert_eq!(
+            (out.row_count, out.truncated, out.rows.len()),
+            (ROWS_MAX as u64, true, ROWS_MAX)
+        );
     }
 
     #[test]
     fn connection_causes_are_added_once() {
         let mut c = vec!["connection closed".to_string()];
-        add_causes(&mut c, vec!["connection closed".into(), "Connection reset by peer".into()]);
+        add_causes(
+            &mut c,
+            vec![
+                "connection closed".into(),
+                "Connection reset by peer".into(),
+            ],
+        );
         assert_eq!(c, vec!["connection closed", "Connection reset by peer"]);
         assert!(timeout_hint("postgres", QUERY_TIMEOUT).contains("cancel"));
         assert!(timeout_hint("mysql", QUERY_TIMEOUT).contains("60 s"));
@@ -2042,8 +2389,17 @@ mod tests {
     #[test]
     fn shown_urls_hide_passwords() {
         assert!(!shown_url("postgres://u:s3cret@h/db").contains("s3cret"));
-        assert_eq!(shown_url("host=h user=u password=s3cret"), "host=h user=u password=•••");
-        assert_eq!(shown_url("host=h password = s3cret dbname=d"), "host=h password = ••• dbname=d");
-        assert_eq!(shown_url("host=h password='a b c' dbname=d"), "host=h password=••• dbname=d");
+        assert_eq!(
+            shown_url("host=h user=u password=s3cret"),
+            "host=h user=u password=•••"
+        );
+        assert_eq!(
+            shown_url("host=h password = s3cret dbname=d"),
+            "host=h password = ••• dbname=d"
+        );
+        assert_eq!(
+            shown_url("host=h password='a b c' dbname=d"),
+            "host=h password=••• dbname=d"
+        );
     }
 }

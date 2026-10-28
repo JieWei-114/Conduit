@@ -129,14 +129,19 @@ fn base_config(cfg: &Cfg) -> Result<ClientConfig, String> {
     c.set("security.protocol", protocol);
 
     if has_sasl {
-        c.set("sasl.mechanism", sasl_mechanism(cfg.sasl_mechanism.as_deref())?);
+        c.set(
+            "sasl.mechanism",
+            sasl_mechanism(cfg.sasl_mechanism.as_deref())?,
+        );
         c.set("sasl.username", cfg.sasl_user.clone().unwrap_or_default());
         c.set("sasl.password", cfg.sasl_pass.clone().unwrap_or_default());
     }
     if ssl {
         let file = |what: &str, v: &Option<String>| -> Result<Option<String>, String> {
             match given(v) {
-                Some(path) if !std::path::Path::new(path).is_file() => Err(format!("{what} {path:?} is not a readable file")),
+                Some(path) if !std::path::Path::new(path).is_file() => {
+                    Err(format!("{what} {path:?} is not a readable file"))
+                }
                 other => Ok(other.map(str::to_string)),
             }
         };
@@ -152,7 +157,10 @@ fn base_config(cfg: &Cfg) -> Result<ClientConfig, String> {
             None => {}
         }
         match (
-            file("the client certificate (sslCertLocation)", &cfg.ssl_certificate_location)?,
+            file(
+                "the client certificate (sslCertLocation)",
+                &cfg.ssl_certificate_location,
+            )?,
             file("the client key (sslKeyLocation)", &cfg.ssl_key_location)?,
         ) {
             (Some(cert), Some(key)) => {
@@ -163,7 +171,11 @@ fn base_config(cfg: &Cfg) -> Result<ClientConfig, String> {
                 }
             }
             (None, None) => {}
-            _ => return Err("a client certificate needs both sslCertLocation and sslKeyLocation".into()),
+            _ => {
+                return Err(
+                    "a client certificate needs both sslCertLocation and sslKeyLocation".into(),
+                )
+            }
         }
         if cfg.ssl_skip_verify == Some(true) {
             c.set("enable.ssl.certificate.verification", "false");
@@ -199,7 +211,12 @@ impl Heard {
 impl Heard {
     fn note(&self, reason: &str) {
         // `… (after 3ms in state CONNECT)` and `, 2 identical error(s) suppressed` vary per retry
-        let reason = reason.split(" (after ").next().unwrap_or(reason).trim().to_string();
+        let reason = reason
+            .split(" (after ")
+            .next()
+            .unwrap_or(reason)
+            .trim()
+            .to_string();
         if let Ok(mut h) = self.0.lock() {
             if !reason.is_empty() && !h.contains(&reason) && h.len() < HEARD_MAX {
                 h.push(reason);
@@ -210,7 +227,11 @@ impl Heard {
 
 impl ClientContext for Heard {
     fn error(&self, error: rdkafka::error::KafkaError, reason: &str) {
-        self.note(&if reason.is_empty() { error.to_string() } else { reason.to_string() });
+        self.note(&if reason.is_empty() {
+            error.to_string()
+        } else {
+            reason.to_string()
+        });
     }
 }
 
@@ -219,7 +240,8 @@ impl ConsumerContext for Heard {}
 /// Hints for a client the configuration refused to create.
 fn config_hints(message: &str) -> Vec<String> {
     let m = message.to_ascii_lowercase();
-    if m.contains("sslcalocation") || m.contains("sslcertlocation") || m.contains("sslkeylocation") {
+    if m.contains("sslcalocation") || m.contains("sslcertlocation") || m.contains("sslkeylocation")
+    {
         vec![]
     } else if m.contains("ssl.ca.location") || m.contains("ca cert") {
         vec!["No CA bundle was found on this machine to check the brokers' certificates: install the system CA certificates (ca-certificates).".into()]
@@ -265,8 +287,12 @@ impl Stop {
             Stop::Failed(stage, chain) => {
                 let timed_out = is_timeout(&chain);
                 let stage = if timed_out { "timeout" } else { stage };
-                let verify = chain.iter().any(|c| c.to_ascii_lowercase().contains("certificate verify failed"));
-                let (mut error, mut log) = attempt.failed_with(stage, chain, timed_out, timeout_ms).await;
+                let verify = chain
+                    .iter()
+                    .any(|c| c.to_ascii_lowercase().contains("certificate verify failed"));
+                let (mut error, mut log) = attempt
+                    .failed_with(stage, chain, timed_out, timeout_ms)
+                    .await;
                 if verify {
                     if let Some(h) = error["hints"].as_array_mut() {
                         h.retain(|x| x.as_str() != Some(super::attempt::CERT_HINT));
@@ -301,7 +327,13 @@ pub fn routes() -> Router {
 }
 
 async fn topics(Json(cfg): Json<Cfg>) -> Json<Value> {
-    let attempt = Attempt::start("METADATA (Kafka)", &cfg.first_broker(), HashMap::new(), cfg.logged(), 0);
+    let attempt = Attempt::start(
+        "METADATA (Kafka)",
+        &cfg.first_broker(),
+        HashMap::new(),
+        cfg.logged(),
+        0,
+    );
     let c = cfg.clone();
     let result = tokio::task::spawn_blocking(move || list_topics(&c, METADATA_TIMEOUT))
         .await
@@ -309,9 +341,14 @@ async fn topics(Json(cfg): Json<Cfg>) -> Json<Value> {
     match result {
         Ok(list) => {
             let log = kafka_reply(&attempt, json!({ "topics": list }));
-            Json(json!({ "ok": true, "topics": list, "durationMs": attempt.elapsed_ms(), "log": log }))
+            Json(
+                json!({ "ok": true, "topics": list, "durationMs": attempt.elapsed_ms(), "log": log }),
+            )
         }
-        Err(stop) => Json(stop.into_failure(&attempt, METADATA_TIMEOUT.as_millis() as u64).await),
+        Err(stop) => Json(
+            stop.into_failure(&attempt, METADATA_TIMEOUT.as_millis() as u64)
+                .await,
+        ),
     }
 }
 
@@ -328,11 +365,7 @@ fn list_topics(cfg: &Cfg, limit: Duration) -> Result<Vec<String>, Stop> {
         }
         Stop::Failed("metadata", client.context().explain(chain(&e)))
     })?;
-    let mut names: Vec<String> = meta
-        .topics()
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
+    let mut names: Vec<String> = meta.topics().iter().map(|t| t.name().to_string()).collect();
     names.sort();
     Ok(names)
 }
@@ -353,19 +386,31 @@ async fn produce(Json(req): Json<ProduceReq>) -> Json<Value> {
     sent["key"] = json!(req.key.as_deref().filter(|k| !k.is_empty()));
     sent["headers"] = json!(req.headers);
     sent["value"] = json!(req.value);
-    let attempt = Attempt::start("PRODUCE (Kafka)", &req.cfg.first_broker(), HashMap::new(), sent, req.value.len());
+    let attempt = Attempt::start(
+        "PRODUCE (Kafka)",
+        &req.cfg.first_broker(),
+        HashMap::new(),
+        sent,
+        req.value.len(),
+    );
     match do_produce(req).await {
         Ok(v) => {
             let log = kafka_reply(&attempt, v.clone());
             Json(json!({ "ok": true, "result": v, "durationMs": attempt.elapsed_ms(), "log": log }))
         }
-        Err(stop) => Json(stop.into_failure(&attempt, PRODUCE_TIMEOUT.as_millis() as u64).await),
+        Err(stop) => Json(
+            stop.into_failure(&attempt, PRODUCE_TIMEOUT.as_millis() as u64)
+                .await,
+        ),
     }
 }
 
 async fn do_produce(req: ProduceReq) -> Result<Value, Stop> {
     let mut conf = base_config(&req.cfg).map_err(Stop::Config)?;
-    conf.set("message.timeout.ms", PRODUCE_TIMEOUT.as_millis().to_string());
+    conf.set(
+        "message.timeout.ms",
+        PRODUCE_TIMEOUT.as_millis().to_string(),
+    );
     let heard = Heard::default();
     let producer: FutureProducer<Heard> = conf
         .create_with_context(heard.clone())
@@ -517,27 +562,41 @@ const TOPIC_REFRESH_MS: &str = "1000";
 /// Where a consumer without committed offsets starts. A topic that does not exist yet when it
 /// connects holds only records published after that, so it reads them all.
 fn offset_reset(from_beginning: bool, topic_missing: bool) -> &'static str {
-    if from_beginning || topic_missing { "earliest" } else { "latest" }
+    if from_beginning || topic_missing {
+        "earliest"
+    } else {
+        "latest"
+    }
 }
 
 /// Before saying "listening": fetch the topic's metadata so an unreachable broker, refused
 /// credentials or a timeout show as an error instead of a stream that never delivers. Ok carries
 /// a note about the topic for the ready line, and whether the topic does not exist yet.
-async fn check_reachable(consumer: Arc<StreamConsumer<Heard>>, cfg: &Cfg, topic: &str) -> Result<(String, bool), Value> {
+async fn check_reachable(
+    consumer: Arc<StreamConsumer<Heard>>,
+    cfg: &Cfg,
+    topic: &str,
+) -> Result<(String, bool), Value> {
     let mut sent = cfg.logged();
     sent["topic"] = json!(topic);
-    let attempt = Attempt::start("METADATA (Kafka)", &cfg.first_broker(), HashMap::new(), sent, 0);
+    let attempt = Attempt::start(
+        "METADATA (Kafka)",
+        &cfg.first_broker(),
+        HashMap::new(),
+        sent,
+        0,
+    );
     let t = topic.to_string();
     let result = tokio::task::spawn_blocking(move || {
         consumer
             .fetch_metadata(Some(&t), METADATA_TIMEOUT)
             .map(|meta| {
-                meta.topics()
-                    .first()
-                    .map(|mt| {
-                        let err = mt.error().map(|e| describe(&rdkafka::error::RDKafkaErrorCode::from(e)));
-                        (mt.partitions().len(), err)
-                    })
+                meta.topics().first().map(|mt| {
+                    let err = mt
+                        .error()
+                        .map(|e| describe(&rdkafka::error::RDKafkaErrorCode::from(e)));
+                    (mt.partitions().len(), err)
+                })
             })
             .map_err(|e| consumer.context().explain(chain(&e)))
     })
@@ -547,9 +606,11 @@ async fn check_reachable(consumer: Arc<StreamConsumer<Heard>>, cfg: &Cfg, topic:
     let result = match result {
         Err(c) => {
             let c2 = cfg.clone();
-            let heard = tokio::task::spawn_blocking(move || match list_topics(&c2, Duration::from_secs(3)) {
-                Err(Stop::Failed(_, why)) => why,
-                _ => vec![],
+            let heard = tokio::task::spawn_blocking(move || {
+                match list_topics(&c2, Duration::from_secs(3)) {
+                    Err(Stop::Failed(_, why)) => why,
+                    _ => vec![],
+                }
             })
             .await
             .unwrap_or_default();
@@ -564,8 +625,14 @@ async fn check_reachable(consumer: Arc<StreamConsumer<Heard>>, cfg: &Cfg, topic:
         ok => ok,
     };
     match result {
-        Ok(Some((_, Some(err)))) => Ok((format!(" · topic not available yet: {err}; its records show once it is created"), true)),
-        Ok(Some((n, None))) => Ok((format!(" · {n} partition{}", if n == 1 { "" } else { "s" }), false)),
+        Ok(Some((_, Some(err)))) => Ok((
+            format!(" · topic not available yet: {err}; its records show once it is created"),
+            true,
+        )),
+        Ok(Some((n, None))) => Ok((
+            format!(" · {n} partition{}", if n == 1 { "" } else { "s" }),
+            false,
+        )),
         Ok(None) => Ok((String::new(), false)),
         Err(c) => Err(Stop::Failed("metadata", c)
             .into_failure(&attempt, METADATA_TIMEOUT.as_millis() as u64)
@@ -711,15 +778,27 @@ mod tests {
         assert_eq!(v["encoding"], "base64");
         assert_eq!(v["text"], "/wAQ");
         let note = v["note"].as_str().unwrap();
-        assert!(note.contains("3 bytes") && note.contains("ff 00 10"), "{note}");
+        assert!(
+            note.contains("3 bytes") && note.contains("ff 00 10"),
+            "{note}"
+        );
         assert_eq!(bytes_view(Some("héllo".as_bytes()))["text"], "héllo");
     }
 
     #[test]
     fn timestamps_keep_their_kind() {
-        assert_eq!(timestamp_json(Timestamp::CreateTime(5)), (json!(5), json!("create")));
-        assert_eq!(timestamp_json(Timestamp::LogAppendTime(6)), (json!(6), json!("logAppend")));
-        assert_eq!(timestamp_json(Timestamp::NotAvailable), (Value::Null, Value::Null));
+        assert_eq!(
+            timestamp_json(Timestamp::CreateTime(5)),
+            (json!(5), json!("create"))
+        );
+        assert_eq!(
+            timestamp_json(Timestamp::LogAppendTime(6)),
+            (json!(6), json!("logAppend"))
+        );
+        assert_eq!(
+            timestamp_json(Timestamp::NotAvailable),
+            (Value::Null, Value::Null)
+        );
     }
 
     #[test]
@@ -734,27 +813,39 @@ mod tests {
             ..Default::default()
         };
         let logged = cfg.logged().to_string();
-        assert!(!logged.contains("s3cret") && !logged.contains("keypw"), "{logged}");
+        assert!(
+            !logged.contains("s3cret") && !logged.contains("keypw"),
+            "{logged}"
+        );
         assert!(logged.contains("SCRAM-SHA-256"), "{logged}");
         assert_eq!(cfg.first_broker(), "b1:9092");
     }
 
     #[test]
     fn a_named_group_commits_only_when_asked() {
-        assert!(commits_offsets(false, false), "a throwaway group commits as before");
-        assert!(!commits_offsets(true, false), "a typed group is left alone by default");
+        assert!(
+            commits_offsets(false, false),
+            "a throwaway group commits as before"
+        );
+        assert!(
+            !commits_offsets(true, false),
+            "a typed group is left alone by default"
+        );
         assert!(commits_offsets(true, true));
     }
 
     #[test]
     fn librdkafka_timeouts_are_recognised() {
-        assert!(is_timeout(&["Meta data fetch error: OperationTimedOut (Local: Timed out)".into()]));
+        assert!(is_timeout(&[
+            "Meta data fetch error: OperationTimedOut (Local: Timed out)".into()
+        ]));
         assert!(!is_timeout(&["Broker: Unknown topic or partition".into()]));
     }
 
     #[test]
     fn a_missing_ca_bundle_is_named() {
-        let h = config_hints("Client creation error: ssl.ca.location failed: No CA certificates found");
+        let h =
+            config_hints("Client creation error: ssl.ca.location failed: No CA certificates found");
         assert!(h[0].contains("CA bundle"), "{h:?}");
         assert!(config_hints("Configuration property \"x\" not supported").is_empty());
     }
@@ -768,7 +859,9 @@ mod tests {
         }))
         .unwrap();
         // Act
-        let made: Result<FutureProducer<Heard>, _> = base_config(&cfg).unwrap().create_with_context(Heard::default());
+        let made: Result<FutureProducer<Heard>, _> = base_config(&cfg)
+            .unwrap()
+            .create_with_context(Heard::default());
         // Assert
         assert!(made.is_ok(), "{:?}", made.err());
     }
@@ -784,13 +877,30 @@ mod tests {
         }))
         .unwrap();
         let c = base_config(&cfg).unwrap();
-        assert_eq!(c.get("ssl.ca.location"), Some(ca.to_string_lossy().as_ref()));
+        assert_eq!(
+            c.get("ssl.ca.location"),
+            Some(ca.to_string_lossy().as_ref())
+        );
         assert_eq!(c.get("enable.ssl.certificate.verification"), Some("false"));
         let off: Cfg = serde_json::from_value(json!({ "brokers": "b:9093", "ssl": true })).unwrap();
-        assert_eq!(base_config(&off).unwrap().get("enable.ssl.certificate.verification"), None, "verification stays on by default");
-        let missing: Cfg = serde_json::from_value(json!({ "brokers": "b", "ssl": true, "sslCaLocation": "/nonexistent/ca.pem" })).unwrap();
-        assert!(base_config(&missing).unwrap_err().contains("/nonexistent/ca.pem"));
-        let half: Cfg = serde_json::from_value(json!({ "brokers": "b", "ssl": true, "sslCertLocation": ca.to_string_lossy() })).unwrap();
+        assert_eq!(
+            base_config(&off)
+                .unwrap()
+                .get("enable.ssl.certificate.verification"),
+            None,
+            "verification stays on by default"
+        );
+        let missing: Cfg = serde_json::from_value(
+            json!({ "brokers": "b", "ssl": true, "sslCaLocation": "/nonexistent/ca.pem" }),
+        )
+        .unwrap();
+        assert!(base_config(&missing)
+            .unwrap_err()
+            .contains("/nonexistent/ca.pem"));
+        let half: Cfg = serde_json::from_value(
+            json!({ "brokers": "b", "ssl": true, "sslCertLocation": ca.to_string_lossy() }),
+        )
+        .unwrap();
         assert!(base_config(&half).unwrap_err().contains("sslKeyLocation"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -801,16 +911,28 @@ mod tests {
         impl Drop for Slow {
             fn drop(&mut self) {
                 std::thread::sleep(Duration::from_millis(300));
-                let _ = self.0.send(std::thread::current().name().unwrap_or("").to_string());
+                let _ = self
+                    .0
+                    .send(std::thread::current().name().unwrap_or("").to_string());
             }
         }
         let (tx, rx) = std::sync::mpsc::channel();
         let held = DropOffRuntime(Some(Slow(tx)));
         let t0 = std::time::Instant::now();
         drop(held);
-        assert!(t0.elapsed() < Duration::from_millis(100), "{:?}", t0.elapsed());
-        let thread = tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(2)).unwrap()).await.unwrap();
-        assert_ne!(thread, std::thread::current().name().unwrap_or("").to_string());
+        assert!(
+            t0.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            t0.elapsed()
+        );
+        let thread =
+            tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(2)).unwrap())
+                .await
+                .unwrap();
+        assert_ne!(
+            thread,
+            std::thread::current().name().unwrap_or("").to_string()
+        );
     }
 
     #[test]
@@ -823,8 +945,18 @@ mod tests {
     #[test]
     fn what_librdkafka_reported_explains_the_failure() {
         let heard = Heard::default();
-        heard.error(rdkafka::error::KafkaError::Global(rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure), "ssl://b:9093/bootstrap: SSL handshake failed: certificate verify failed");
-        heard.error(rdkafka::error::KafkaError::Global(rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure), "ssl://b:9093/bootstrap: SSL handshake failed: certificate verify failed");
+        heard.error(
+            rdkafka::error::KafkaError::Global(
+                rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure,
+            ),
+            "ssl://b:9093/bootstrap: SSL handshake failed: certificate verify failed",
+        );
+        heard.error(
+            rdkafka::error::KafkaError::Global(
+                rdkafka::types::RDKafkaErrorCode::BrokerTransportFailure,
+            ),
+            "ssl://b:9093/bootstrap: SSL handshake failed: certificate verify failed",
+        );
         let chain = heard.explain(vec!["Meta data fetch error: BrokerTransportFailure".into()]);
         assert_eq!(chain.len(), 2, "{chain:?}");
         assert!(chain[1].contains("certificate verify failed"));

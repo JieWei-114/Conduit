@@ -20,19 +20,29 @@ pub fn routes() -> Router {
 }
 
 static DEFAULT_ROOT: Lazy<String> = Lazy::new(|| {
-    std::env::var("PROTO_ROOT").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
-        std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_default()
-    })
+    std::env::var("PROTO_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default()
+        })
 });
 
 const SKIP_DIRS: &[&str] = &["node_modules", "output-grpc", "dist", ".git"];
 
 fn home_dir() -> String {
-    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default()
 }
 
 fn resolve_root(root: Option<&str>) -> Result<PathBuf, String> {
-    let r = root.map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or(DEFAULT_ROOT.as_str());
+    let r = root
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_ROOT.as_str());
     let abs = if let Some(rest) = r.strip_prefix('~') {
         PathBuf::from(home_dir()).join(rest.trim_start_matches('/'))
     } else {
@@ -187,8 +197,22 @@ fn inspect_proto(root: &Path, rel: &str) -> ProtoInfo {
     let mut messages: Vec<MessageDef> = Vec::new();
     let mut pkg = String::new();
     let mut visited: Vec<String> = Vec::new();
-    parse_file(root, rel, true, &mut visited, &mut pkg, &mut services, &mut messages, &mut enums);
-    ProtoInfo { pkg, services, messages, enums }
+    parse_file(
+        root,
+        rel,
+        true,
+        &mut visited,
+        &mut pkg,
+        &mut services,
+        &mut messages,
+        &mut enums,
+    );
+    ProtoInfo {
+        pkg,
+        services,
+        messages,
+        enums,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -228,7 +252,9 @@ fn parse_file(
 
     for import in parse_imports(&src_str) {
         if !import.starts_with("google/") {
-            parse_file(root, &import, false, visited, pkg, services, messages, enums);
+            parse_file(
+                root, &import, false, visited, pkg, services, messages, enums,
+            );
         }
     }
 }
@@ -328,7 +354,10 @@ fn parse_services(src: &[char], services: &mut Vec<ServiceDef>) {
         };
         if !name.is_empty() {
             let rpcs = parse_rpcs(&src[bs..be]);
-            services.push(ServiceDef { service: name, rpcs });
+            services.push(ServiceDef {
+                service: name,
+                rpcs,
+            });
         }
         from = be + 1;
     }
@@ -422,7 +451,12 @@ fn parse_enums(src: &[char], enums: &mut Vec<EnumDef>) {
                 let after = after.trim_start();
                 if !ident.is_empty() && after.starts_with('=') {
                     let num = after[1..].trim_start();
-                    if num.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    if num
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false)
+                    {
                         values.push(ident);
                     }
                 }
@@ -525,7 +559,12 @@ fn parse_fields(body: &str) -> Vec<FieldDef> {
             String::new()
         };
         let ty_clean: String = ty.chars().filter(|c| !c.is_whitespace()).collect();
-        out.push(FieldDef { name, ty: ty_clean, repeated, comment });
+        out.push(FieldDef {
+            name,
+            ty: ty_clean,
+            repeated,
+            comment,
+        });
     }
     out
 }
@@ -554,8 +593,8 @@ fn load_descriptor(
 
     let parsed = parser.parse_and_typecheck().map_err(|e| format!("{e}"))?;
     let fds = parsed.file_descriptors;
-    let descriptors = protobuf::reflect::FileDescriptor::new_dynamic_fds(fds, &[])
-        .map_err(|e| format!("{e}"))?;
+    let descriptors =
+        protobuf::reflect::FileDescriptor::new_dynamic_fds(fds, &[]).map_err(|e| format!("{e}"))?;
 
     let bare = full_name.strip_prefix('.').unwrap_or(full_name);
     let dotted = format!(".{bare}");
@@ -567,37 +606,69 @@ fn load_descriptor(
     Err(format!("message not found: {bare}"))
 }
 
-fn encode_text(root: &Path, proto_rel: &str, req_type: &str, text: &str) -> Result<Vec<u8>, String> {
+fn encode_text(
+    root: &Path,
+    proto_rel: &str,
+    req_type: &str,
+    text: &str,
+) -> Result<Vec<u8>, String> {
     let md = load_descriptor(root, proto_rel, req_type)?;
     let mut msg = md.new_instance();
     protobuf::text_format::merge_from_str(&mut *msg, text).map_err(|e| format!("{e}"))?;
     msg.write_to_bytes_dyn().map_err(|e| format!("{e}"))
 }
 
-fn decode_bytes(root: &Path, proto_rel: &str, res_type: &str, bytes: &[u8]) -> Result<String, String> {
+fn decode_bytes(
+    root: &Path,
+    proto_rel: &str,
+    res_type: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
     let md = load_descriptor(root, proto_rel, res_type)?;
     let mut msg = md.new_instance();
-    msg.merge_from_bytes_dyn(bytes).map_err(|e| format!("{e}"))?;
+    msg.merge_from_bytes_dyn(bytes)
+        .map_err(|e| format!("{e}"))?;
     Ok(protobuf::text_format::print_to_string(&*msg))
 }
 
 /* Encoding and decoding parse the .proto (and its imports) from disk, which is
-   blocking work, so the request handlers run them on the blocking pool — the
-   same reason as the scan in `protos`. Decoding takes every frame at once so a
-   multi-message response parses its descriptor on one thread, not one each. */
-async fn encode_off_thread(root: &Path, proto_rel: &str, req_type: &str, text: &str) -> Result<Vec<u8>, String> {
-    let (root, proto_rel, req_type, text) =
-        (root.to_path_buf(), proto_rel.to_string(), req_type.to_string(), text.to_string());
+blocking work, so the request handlers run them on the blocking pool — the
+same reason as the scan in `protos`. Decoding takes every frame at once so a
+multi-message response parses its descriptor on one thread, not one each. */
+async fn encode_off_thread(
+    root: &Path,
+    proto_rel: &str,
+    req_type: &str,
+    text: &str,
+) -> Result<Vec<u8>, String> {
+    let (root, proto_rel, req_type, text) = (
+        root.to_path_buf(),
+        proto_rel.to_string(),
+        req_type.to_string(),
+        text.to_string(),
+    );
     tokio::task::spawn_blocking(move || encode_text(&root, &proto_rel, &req_type, &text))
         .await
         .map_err(|e| format!("encode task failed: {e}"))?
 }
 
-async fn decode_off_thread(root: &Path, proto_rel: &str, res_type: &str, frames: Vec<Vec<u8>>) -> Vec<Result<String, String>> {
-    let (root, proto_rel, res_type) = (root.to_path_buf(), proto_rel.to_string(), res_type.to_string());
+async fn decode_off_thread(
+    root: &Path,
+    proto_rel: &str,
+    res_type: &str,
+    frames: Vec<Vec<u8>>,
+) -> Vec<Result<String, String>> {
+    let (root, proto_rel, res_type) = (
+        root.to_path_buf(),
+        proto_rel.to_string(),
+        res_type.to_string(),
+    );
     let n = frames.len();
     tokio::task::spawn_blocking(move || {
-        frames.iter().map(|f| decode_bytes(&root, &proto_rel, &res_type, f)).collect()
+        frames
+            .iter()
+            .map(|f| decode_bytes(&root, &proto_rel, &res_type, f))
+            .collect()
     })
     .await
     .unwrap_or_else(|e| vec![Err(format!("decode task failed: {e}")); n])
@@ -619,7 +690,8 @@ fn deframe(buf: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, String>) {
     let mut trailer_text = String::new();
     while off + 5 <= buf.len() {
         let flag = buf[off];
-        let len = u32::from_be_bytes([buf[off + 1], buf[off + 2], buf[off + 3], buf[off + 4]]) as usize;
+        let len =
+            u32::from_be_bytes([buf[off + 1], buf[off + 2], buf[off + 3], buf[off + 4]]) as usize;
         let end = std::cmp::min(off + 5 + len, buf.len());
         let chunk = &buf[off + 5..end];
         if flag & 0x80 != 0 {
@@ -633,7 +705,10 @@ fn deframe(buf: &[u8]) -> (Vec<Vec<u8>>, HashMap<String, String>) {
     for line in trailer_text.split("\r\n") {
         if let Some(i) = line.find(':') {
             if i > 0 {
-                trailers.insert(line[..i].trim().to_string(), line[i + 1..].trim().to_string());
+                trailers.insert(
+                    line[..i].trim().to_string(),
+                    line[i + 1..].trim().to_string(),
+                );
             }
         }
     }
@@ -698,7 +773,11 @@ struct RawEncoder;
 impl tonic::codec::Encoder for RawEncoder {
     type Item = Vec<u8>;
     type Error = tonic::Status;
-    fn encode(&mut self, item: Self::Item, dst: &mut tonic::codec::EncodeBuf<'_>) -> Result<(), Self::Error> {
+    fn encode(
+        &mut self,
+        item: Self::Item,
+        dst: &mut tonic::codec::EncodeBuf<'_>,
+    ) -> Result<(), Self::Error> {
         use bytes::BufMut;
         dst.put_slice(&item);
         Ok(())
@@ -709,7 +788,10 @@ struct RawDecoder;
 impl tonic::codec::Decoder for RawDecoder {
     type Item = bytes::Bytes;
     type Error = tonic::Status;
-    fn decode(&mut self, src: &mut tonic::codec::DecodeBuf<'_>) -> Result<Option<Self::Item>, Self::Error> {
+    fn decode(
+        &mut self,
+        src: &mut tonic::codec::DecodeBuf<'_>,
+    ) -> Result<Option<Self::Item>, Self::Error> {
         use bytes::Buf;
         let len = src.remaining();
         let bytes = src.copy_to_bytes(len);
@@ -747,7 +829,11 @@ impl DirectErr {
         }
         Self::Status {
             code: status.code() as i32,
-            details: if status.message().is_empty() { status.code().to_string() } else { status.message().to_string() },
+            details: if status.message().is_empty() {
+                status.code().to_string()
+            } else {
+                status.message().to_string()
+            },
             trailers: md_to_obj(status.metadata()),
             status_bin: status.details().to_vec(),
         }
@@ -786,7 +872,10 @@ pub(super) fn md_to_obj(md: &tonic::metadata::MetadataMap) -> HashMap<String, St
     let mut out = HashMap::new();
     for kv in md.iter() {
         if let tonic::metadata::KeyAndValueRef::Ascii(k, v) = kv {
-            out.insert(k.as_str().to_string(), super::http::header_text(v.as_bytes()));
+            out.insert(
+                k.as_str().to_string(),
+                super::http::header_text(v.as_bytes()),
+            );
         }
     }
     out
@@ -794,8 +883,13 @@ pub(super) fn md_to_obj(md: &tonic::metadata::MetadataMap) -> HashMap<String, St
 
 /// The caller's headers as gRPC metadata. A key ending in `-bin` carries its value as bytes; a
 /// name or value a header cannot carry is refused, never dropped.
-pub(super) fn apply_metadata(md: &mut tonic::metadata::MetadataMap, headers: &HashMap<String, String>) -> Result<(), String> {
-    use tonic::metadata::{AsciiMetadataKey, BinaryMetadataKey, BinaryMetadataValue, MetadataValue};
+pub(super) fn apply_metadata(
+    md: &mut tonic::metadata::MetadataMap,
+    headers: &HashMap<String, String>,
+) -> Result<(), String> {
+    use tonic::metadata::{
+        AsciiMetadataKey, BinaryMetadataKey, BinaryMetadataValue, MetadataValue,
+    };
     let mut names: Vec<&String> = headers.keys().collect();
     names.sort();
     for k in names {
@@ -805,7 +899,8 @@ pub(super) fn apply_metadata(md: &mut tonic::metadata::MetadataMap, headers: &Ha
             continue;
         }
         if kl.ends_with("-bin") {
-            let key = BinaryMetadataKey::from_bytes(kl.as_bytes()).map_err(|_| format!("metadata name {k:?} is not a valid gRPC metadata key"))?;
+            let key = BinaryMetadataKey::from_bytes(kl.as_bytes())
+                .map_err(|_| format!("metadata name {k:?} is not a valid gRPC metadata key"))?;
             md.insert_bin(key, BinaryMetadataValue::from_bytes(v.as_bytes()));
             continue;
         }
@@ -831,29 +926,37 @@ async fn call_direct(
     let uri = format!("{scheme}://{target}");
 
     let grpc_path = req.grpc_path.clone().unwrap_or_default();
-    let path = http::uri::PathAndQuery::from_maybe_shared(grpc_path.clone())
-        .map_err(|e| DirectErr::NotSent(format!("bad method path {grpc_path:?}: {}", describe(&e))))?;
+    let path = http::uri::PathAndQuery::from_maybe_shared(grpc_path.clone()).map_err(|e| {
+        DirectErr::NotSent(format!("bad method path {grpc_path:?}: {}", describe(&e)))
+    })?;
     let mut ep = tonic::transport::Channel::from_shared(uri)
         .map_err(|e| DirectErr::NotSent(format!("bad target {target:?}: {}", describe(&e))))?;
-    ep = ep.timeout(Duration::from_millis(timeout_ms)).connect_timeout(Duration::from_millis(timeout_ms));
+    ep = ep
+        .timeout(Duration::from_millis(timeout_ms))
+        .connect_timeout(Duration::from_millis(timeout_ms));
     if !plaintext {
         ep = ep
             .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
             .map_err(|e| DirectErr::NotSent(format!("TLS setup failed: {}", describe(&e))))?;
     }
 
-    let channel = ep
-        .connect()
-        .await
-        .map_err(|e| DirectErr::Failed { chain: chain(&e), timed_out: conduit_timed_out(&e) })?;
+    let channel = ep.connect().await.map_err(|e| DirectErr::Failed {
+        chain: chain(&e),
+        timed_out: conduit_timed_out(&e),
+    })?;
 
     let mut grpc = tonic::client::Grpc::new(channel);
-    grpc.ready()
-        .await
-        .map_err(|e| DirectErr::Failed { chain: chain(&e), timed_out: conduit_timed_out(&e) })?;
+    grpc.ready().await.map_err(|e| DirectErr::Failed {
+        chain: chain(&e),
+        timed_out: conduit_timed_out(&e),
+    })?;
 
     let mut request = tonic::Request::new(payload);
-    apply_metadata(request.metadata_mut(), &req.headers.clone().unwrap_or_default()).map_err(DirectErr::NotSent)?;
+    apply_metadata(
+        request.metadata_mut(),
+        &req.headers.clone().unwrap_or_default(),
+    )
+    .map_err(DirectErr::NotSent)?;
 
     match grpc.unary(request, path, RawCodec).await {
         Ok(resp) => {
@@ -861,7 +964,11 @@ async fn call_direct(
             let (meta, body, extensions) = resp.into_parts();
             let _ = extensions;
             let trailers = md_to_obj(&meta);
-            Ok(DirectOk { resp: body.to_vec(), headers, trailers })
+            Ok(DirectOk {
+                resp: body.to_vec(),
+                headers,
+                trailers,
+            })
         }
         Err(status) => Err(DirectErr::from_status(&status)),
     }
@@ -915,9 +1022,9 @@ async fn config() -> Json<Value> {
 }
 
 /* The scan is a synchronous directory walk, so it runs on a blocking thread.
-   Run directly, a wide root (`/` reaches a great deal at depth 8) holds a
-   runtime worker for minutes, and enough of those stall the whole server —
-   every other request queues behind it, WebSocket upgrades included. */
+Run directly, a wide root (`/` reaches a great deal at depth 8) holds a
+runtime worker for minutes, and enough of those stall the whole server —
+every other request queues behind it, WebSocket upgrades included. */
 async fn protos(Query(q): Query<RootQuery>) -> Json<Value> {
     let root = match resolve_root(q.root.as_deref()) {
         Ok(r) => r,
@@ -963,7 +1070,11 @@ async fn do_call(req: CallReq) -> Value {
     let request_body = Value::String(req.text_body.clone());
     let target = req.target.as_deref().unwrap_or("").trim().to_string();
     let grpc_path = req.grpc_path.clone().unwrap_or_default();
-    let scheme = if req.plaintext.unwrap_or(true) { "http" } else { "https" };
+    let scheme = if req.plaintext.unwrap_or(true) {
+        "http"
+    } else {
+        "https"
+    };
     let direct_url = format!("{scheme}://{target}{grpc_path}");
     let (method, url) = if direct {
         ("POST (gRPC)", direct_url.as_str())
@@ -973,7 +1084,13 @@ async fn do_call(req: CallReq) -> Value {
 
     // refused before anything is sent: the same failure shape (and record) as a failed call
     let not_sent = |stage: &str, message: &str| {
-        let attempt = Attempt::start(method, url, req.headers.clone().unwrap_or_default(), request_body.clone(), 0);
+        let attempt = Attempt::start(
+            method,
+            url,
+            req.headers.clone().unwrap_or_default(),
+            request_body.clone(),
+            0,
+        );
         let (error, log) = attempt.not_sent(stage, message);
         json!({ "ok": false, "stage": stage, "error": message, "detail": error, "durationMs": 0, "log": log })
     };
@@ -992,7 +1109,13 @@ async fn do_call(req: CallReq) -> Value {
     };
 
     if direct {
-        let attempt = Attempt::start(method, url, req.headers.clone().unwrap_or_default(), request_body, payload.len());
+        let attempt = Attempt::start(
+            method,
+            url,
+            req.headers.clone().unwrap_or_default(),
+            request_body,
+            payload.len(),
+        );
         let r = call_direct(&req, payload, timeout_ms).await;
         let duration_ms = attempt.elapsed_ms();
         match r {
@@ -1002,7 +1125,9 @@ async fn do_call(req: CallReq) -> Value {
             }
             Err(DirectErr::Failed { chain, timed_out }) => {
                 let stage = if timed_out { "timeout" } else { "network" };
-                let (error, log) = attempt.failed_with(stage, chain, timed_out, timeout_ms).await;
+                let (error, log) = attempt
+                    .failed_with(stage, chain, timed_out, timeout_ms)
+                    .await;
                 return json!({
                     "ok": false,
                     "stage": stage,
@@ -1012,7 +1137,12 @@ async fn do_call(req: CallReq) -> Value {
                     "log": log,
                 });
             }
-            Err(DirectErr::Status { code, details, trailers, status_bin }) => {
+            Err(DirectErr::Status {
+                code,
+                details,
+                trailers,
+                status_bin,
+            }) => {
                 let log = attempt.succeeded(Reply {
                     status: 200,
                     headers: &HashMap::new(),
@@ -1036,10 +1166,15 @@ async fn do_call(req: CallReq) -> Value {
                 });
             }
             Ok(ok) => {
-                let decoded = match decode_off_thread(&root, &req.proto, &req.res_type, vec![ok.resp.clone()])
-                    .await
-                    .pop()
-                    .unwrap_or_else(|| Err("no frame".into()))
+                let decoded = match decode_off_thread(
+                    &root,
+                    &req.proto,
+                    &req.res_type,
+                    vec![ok.resp.clone()],
+                )
+                .await
+                .pop()
+                .unwrap_or_else(|| Err("no frame".into()))
                 {
                     Ok(s) => s,
                     Err(e) => format!("<decode failed: {e}>"),
@@ -1078,11 +1213,22 @@ async fn do_call(req: CallReq) -> Value {
             headers.insert(k.to_lowercase(), v);
         }
     }
-    headers.entry("user-agent".into()).or_insert_with(super::http::user_agent);
+    headers
+        .entry("user-agent".into())
+        .or_insert_with(super::http::user_agent);
     let body = frame(&payload);
-    let attempt = Attempt::start("POST (gRPC-Web)", &req.url, headers.clone(), request_body, body.len());
+    let attempt = Attempt::start(
+        "POST (gRPC-Web)",
+        &req.url,
+        headers.clone(),
+        request_body,
+        body.len(),
+    );
 
-    let client = match reqwest::Client::builder().timeout(Duration::from_millis(timeout_ms)).build() {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+    {
         Ok(c) => c,
         Err(e) => {
             let (error, log) = attempt.not_sent("request", &super::attempt::describe(&e));
@@ -1114,7 +1260,9 @@ async fn do_call(req: CallReq) -> Value {
             let duration_ms = attempt.elapsed_ms();
             let timed_out = e.is_timeout();
             let stage = if timed_out { "timeout" } else { "network" };
-            let (error, log) = attempt.failed(stage, &e.without_url(), timed_out, timeout_ms).await;
+            let (error, log) = attempt
+                .failed(stage, &e.without_url(), timed_out, timeout_ms)
+                .await;
             return json!({ "ok": false, "stage": stage, "error": error["message"], "detail": error, "durationMs": duration_ms, "log": log });
         }
     };
@@ -1122,18 +1270,36 @@ async fn do_call(req: CallReq) -> Value {
     let status = resp.status().as_u16();
     let mut resp_headers: HashMap<String, String> = HashMap::new();
     for (k, v) in resp.headers().iter() {
-        resp_headers.insert(k.as_str().to_string(), super::http::header_text(v.as_bytes()));
+        resp_headers.insert(
+            k.as_str().to_string(),
+            super::http::header_text(v.as_bytes()),
+        );
     }
-    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-    let header_grpc_status = resp.headers().get("grpc-status").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
-    let header_grpc_message = resp.headers().get("grpc-message").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let header_grpc_status = resp
+        .headers()
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let header_grpc_message = resp
+        .headers()
+        .get("grpc-message")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let buf = match resp.bytes().await {
         Ok(b) => b.to_vec(),
         Err(e) => {
             let duration_ms = attempt.elapsed_ms();
             let timed_out = e.is_timeout();
-            let (error, log) = attempt.failed("body", &e.without_url(), timed_out, timeout_ms).await;
+            let (error, log) = attempt
+                .failed("body", &e.without_url(), timed_out, timeout_ms)
+                .await;
             return json!({ "ok": false, "stage": error["stage"], "error": error["message"], "detail": error, "durationMs": duration_ms, "log": log });
         }
     };
@@ -1153,13 +1319,29 @@ async fn do_call(req: CallReq) -> Value {
     }
 
     let (frames, trailers) = deframe(&buf);
-    let grpc_status = trailers.get("grpc-status").cloned().or(header_grpc_status).unwrap_or_default();
-    let grpc_message = decode_grpc_message(&trailers.get("grpc-message").cloned().or(header_grpc_message).unwrap_or_default());
+    let grpc_status = trailers
+        .get("grpc-status")
+        .cloned()
+        .or(header_grpc_status)
+        .unwrap_or_default();
+    let grpc_message = decode_grpc_message(
+        &trailers
+            .get("grpc-message")
+            .cloned()
+            .or(header_grpc_message)
+            .unwrap_or_default(),
+    );
 
     let non_empty: Vec<&Vec<u8>> = frames.iter().filter(|f| !f.is_empty()).collect();
     let total = non_empty.len();
     let mut parts: Vec<String> = Vec::new();
-    let decoded = decode_off_thread(&root, &req.proto, &req.res_type, non_empty.iter().map(|f| f.to_vec()).collect()).await;
+    let decoded = decode_off_thread(
+        &root,
+        &req.proto,
+        &req.res_type,
+        non_empty.iter().map(|f| f.to_vec()).collect(),
+    )
+    .await;
     for (i, d) in decoded.into_iter().enumerate() {
         let text = match d {
             Ok(s) => s,
@@ -1206,7 +1388,9 @@ fn direct_missing(direct: bool, target: &str, grpc_path: &str) -> Option<&'stati
         (false, ..) => None,
         (true, true, true) => Some("direct mode needs a target host:port and a method"),
         (true, true, false) => Some("direct mode needs a target host:port"),
-        (true, false, true) => Some("direct mode needs a method (its /package.Service/Method path)"),
+        (true, false, true) => {
+            Some("direct mode needs a method (its /package.Service/Method path)")
+        }
         (true, false, false) => None,
     }
 }
@@ -1242,11 +1426,17 @@ mod tests {
 
     #[test]
     fn a_transport_error_after_connecting_is_a_network_failure() {
-        let io = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset by peer");
+        let io = std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        );
         let status = tonic::Status::from_error(Box::new(io));
         let (chain, timed_out) = local_failure(&status).expect("made on this side");
         assert!(!timed_out);
-        assert!(chain.iter().any(|c| c.contains("connection reset")), "{chain:?}");
+        assert!(
+            chain.iter().any(|c| c.contains("connection reset")),
+            "{chain:?}"
+        );
     }
 
     #[test]
@@ -1262,14 +1452,23 @@ mod tests {
     fn direct_mode_names_what_is_missing() {
         assert_eq!(direct_missing(false, "", ""), None);
         assert_eq!(direct_missing(true, "h:1", "/a.B/C"), None);
-        assert_eq!(direct_missing(true, "h:1", ""), Some("direct mode needs a method (its /package.Service/Method path)"));
-        assert_eq!(direct_missing(true, "", "/a.B/C"), Some("direct mode needs a target host:port"));
+        assert_eq!(
+            direct_missing(true, "h:1", ""),
+            Some("direct mode needs a method (its /package.Service/Method path)")
+        );
+        assert_eq!(
+            direct_missing(true, "", "/a.B/C"),
+            Some("direct mode needs a target host:port")
+        );
     }
 
     #[test]
     fn metadata_with_non_ascii_bytes_is_kept() {
         let mut md = tonic::metadata::MetadataMap::new();
-        md.insert("x-name", tonic::metadata::MetadataValue::try_from("caf\u{e9}".as_bytes()).unwrap());
+        md.insert(
+            "x-name",
+            tonic::metadata::MetadataValue::try_from("caf\u{e9}".as_bytes()).unwrap(),
+        );
         assert_eq!(md_to_obj(&md)["x-name"], "caf\u{e9}");
     }
 
@@ -1291,7 +1490,14 @@ mod tests {
         h.insert("x-name-bin".to_string(), "caf\u{e9}".to_string());
         h.insert("x-plain".to_string(), "ok".to_string());
         apply_metadata(&mut md, &h).unwrap();
-        assert_eq!(md.get_bin("x-name-bin").unwrap().to_bytes().unwrap().as_ref(), "caf\u{e9}".as_bytes());
+        assert_eq!(
+            md.get_bin("x-name-bin")
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            "caf\u{e9}".as_bytes()
+        );
         assert_eq!(md.get("x-plain").unwrap(), "ok");
     }
 

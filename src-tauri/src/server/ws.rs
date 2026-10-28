@@ -76,7 +76,10 @@ pub(super) fn decode_headers(blob: Option<&str>) -> Result<Vec<(HeaderName, Head
     if bad.is_empty() {
         Ok(out)
     } else {
-        Err(format!("Not connected. Fix these headers: {}", bad.join("; ")))
+        Err(format!(
+            "Not connected. Fix these headers: {}",
+            bad.join("; ")
+        ))
     }
 }
 
@@ -99,7 +102,11 @@ pub(super) fn headers_json(h: &HeaderMap) -> Map<String, Value> {
 }
 
 /// What a non-upgrade answer to a WebSocket handshake most likely means.
-fn handshake_status_hints(status: u16, location: Option<&str>, sent: &HashMap<String, String>) -> Vec<String> {
+fn handshake_status_hints(
+    status: u16,
+    location: Option<&str>,
+    sent: &HashMap<String, String>,
+) -> Vec<String> {
     let mut out = Vec::new();
     match status {
         200 => out.push("The server answered with an ordinary page instead of switching to WebSocket: this URL is not a WebSocket endpoint (check the path), or a proxy in between does not pass WebSocket upgrades.".into()),
@@ -135,12 +142,25 @@ pub(super) fn stream_failure(chain: Vec<String>) -> Value {
 /// The record of a request whose answer was not the stream asked for (a 401 instead of the
 /// upgrade, say): the answer as the response, `detail` as the error. The request and the
 /// response both happened, so both are in the log.
-pub(super) fn refused_log(att: &Attempt, status: u16, headers: &Map<String, Value>, body: &str, bytes: usize, detail: &Value) -> Value {
+pub(super) fn refused_log(
+    att: &Attempt,
+    status: u16,
+    headers: &Map<String, Value>,
+    body: &str,
+    bytes: usize,
+    detail: &Value,
+) -> Value {
     let headers: HashMap<String, String> = headers
         .iter()
         .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
         .collect();
-    let mut log = att.succeeded(Reply { status, headers: &headers, trailers: None, body: json!(body), bytes });
+    let mut log = att.succeeded(Reply {
+        status,
+        headers: &headers,
+        trailers: None,
+        body: json!(body),
+        bytes,
+    });
     log["error"] = detail.clone();
     log
 }
@@ -151,13 +171,23 @@ pub(super) fn opened_log(att: &Attempt, status: u16, headers: &Map<String, Value
         .iter()
         .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
         .collect();
-    att.succeeded(Reply { status, headers: &headers, trailers: None, body: Value::Null, bytes: 0 })
+    att.succeeded(Reply {
+        status,
+        headers: &headers,
+        trailers: None,
+        body: Value::Null,
+        bytes: 0,
+    })
 }
 
 /// A request refused before it was sent, as the error envelope: `detail` and `log` say why.
 async fn refuse(client: &mut WebSocket, att: &Attempt, message: &str) {
     let (detail, log) = att.not_sent("request", message);
-    send_error(client, json!({ "stage": "request", "error": message, "detail": detail, "log": log })).await;
+    send_error(
+        client,
+        json!({ "stage": "request", "error": message, "detail": detail, "log": log }),
+    )
+    .await;
 }
 
 async fn handle(mut client: WebSocket, q: ProxyQuery) {
@@ -166,7 +196,12 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
     let unsent = Attempt::start("GET", &target, HashMap::new(), Value::Null, 0);
     let low = target.to_lowercase();
     if !(low.starts_with("ws://") || low.starts_with("wss://")) {
-        refuse(&mut client, &unsent, "Not connected. The URL must start with ws:// or wss://.").await;
+        refuse(
+            &mut client,
+            &unsent,
+            "Not connected. The URL must start with ws:// or wss://.",
+        )
+        .await;
         return;
     }
 
@@ -189,7 +224,12 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
     let mut request = match target.as_str().into_client_request() {
         Ok(r) => r,
         Err(e) => {
-            refuse(&mut client, &unsent, &format!("Not connected. {}", attempt::describe(&e))).await;
+            refuse(
+                &mut client,
+                &unsent,
+                &format!("Not connected. {}", attempt::describe(&e)),
+            )
+            .await;
             return;
         }
     };
@@ -209,7 +249,12 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
                     hmap.insert("sec-websocket-protocol", val);
                 }
                 Err(_) => {
-                    refuse(&mut client, &unsent, "Not connected. The subprotocol list has characters a header cannot carry.").await;
+                    refuse(
+                        &mut client,
+                        &unsent,
+                        "Not connected. The subprotocol list has characters a header cannot carry.",
+                    )
+                    .await;
                     return;
                 }
             }
@@ -219,9 +264,20 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
     let sent: HashMap<String, String> = request
         .headers()
         .iter()
-        .map(|(k, v)| (k.to_string(), String::from_utf8_lossy(v.as_bytes()).to_string()))
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                String::from_utf8_lossy(v.as_bytes()).to_string(),
+            )
+        })
         .collect();
-    let att = Attempt::start("GET", &attempt::redact_url(&target), sent.clone(), Value::Null, 0);
+    let att = Attempt::start(
+        "GET",
+        &attempt::redact_url(&target),
+        sent.clone(),
+        Value::Null,
+        0,
+    );
 
     let connected = tokio::time::timeout(
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
@@ -240,10 +296,7 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
                 status.as_u16(),
                 status.canonical_reason().unwrap_or("")
             );
-            let location = resp
-                .headers()
-                .get("location")
-                .and_then(|v| v.to_str().ok());
+            let location = resp.headers().get("location").and_then(|v| v.to_str().ok());
             let (mut detail, _) = att.server_refused("handshake", vec![message.clone()], "http");
             detail["hints"] = json!(handshake_status_hints(status.as_u16(), location, &sent));
             let log = refused_log(&att, status.as_u16(), &headers, &body, raw.len(), &detail);
@@ -264,7 +317,9 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
             return;
         }
         Ok(Err(e)) => {
-            let (detail, log) = att.failed("handshake", &e, false, HANDSHAKE_TIMEOUT_MS).await;
+            let (detail, log) = att
+                .failed("handshake", &e, false, HANDSHAKE_TIMEOUT_MS)
+                .await;
             send_error(
                 &mut client,
                 json!({ "stage": "handshake", "error": attempt::describe(&e), "detail": detail, "log": log, "ms": att.elapsed_ms() }),
@@ -276,7 +331,9 @@ async fn handle(mut client: WebSocket, q: ProxyQuery) {
             let (detail, log) = att
                 .failed_with(
                     "timeout",
-                    vec![format!("no WebSocket handshake within {HANDSHAKE_TIMEOUT_MS} ms")],
+                    vec![format!(
+                        "no WebSocket handshake within {HANDSHAKE_TIMEOUT_MS} ms"
+                    )],
                     true,
                     HANDSHAKE_TIMEOUT_MS,
                 )
@@ -443,7 +500,9 @@ mod tests {
     #[test]
     fn bad_headers_are_reported_not_skipped() {
         assert!(decode_headers(Some("%%%")).unwrap_err().contains("base64"));
-        assert!(decode_headers(Some(&b64("[1]"))).unwrap_err().contains("JSON object"));
+        assert!(decode_headers(Some(&b64("[1]")))
+            .unwrap_err()
+            .contains("JSON object"));
         let e = decode_headers(Some(&b64(r#"{"bad name":"v","x-ok":"a\nb","n":1}"#))).unwrap_err();
         assert!(e.contains("\"bad name\" is not a valid header name"), "{e}");
         assert!(e.contains("value of \"x-ok\""), "{e}");
@@ -476,7 +535,10 @@ mod tests {
 
     #[test]
     fn a_stream_failure_has_a_kind_and_no_probe() {
-        let d = stream_failure(vec!["WebSocket protocol error".into(), "Connection reset without closing handshake".into()]);
+        let d = stream_failure(vec![
+            "WebSocket protocol error".into(),
+            "Connection reset without closing handshake".into(),
+        ]);
         assert_eq!(d["stage"], "stream");
         assert_eq!(d["kind"], "protocol");
         assert_eq!(d["message"], "Connection reset without closing handshake");

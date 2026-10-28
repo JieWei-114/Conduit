@@ -63,7 +63,9 @@ async fn send(Json(req): Json<SendReq>) -> Json<Value> {
     let not_sent = |message: &str| {
         let attempt = Attempt::start(&method, &url, h.clone(), Value::Null, 0);
         let (error, log) = attempt.not_sent("request", message);
-        Json(json!({ "ok": false, "stage": "request", "error": message, "detail": error, "durationMs": 0, "log": log }))
+        Json(
+            json!({ "ok": false, "stage": "request", "error": message, "detail": error, "durationMs": 0, "log": log }),
+        )
     };
     if url.trim().is_empty() {
         return not_sent("missing url");
@@ -158,8 +160,12 @@ async fn send(Json(req): Json<SendReq>) -> Json<Value> {
             let dur = attempt.elapsed_ms();
             let timed_out = e.is_timeout();
             let stage = if timed_out { "timeout" } else { "network" };
-            let (error, log) = attempt.failed(stage, &e.without_url(), timed_out, timeout_ms).await;
-            return Json(json!({ "ok": false, "stage": error["stage"], "error": error["message"], "detail": error, "durationMs": dur, "log": log }));
+            let (error, log) = attempt
+                .failed(stage, &e.without_url(), timed_out, timeout_ms)
+                .await;
+            return Json(
+                json!({ "ok": false, "stage": error["stage"], "error": error["message"], "detail": error, "durationMs": dur, "log": log }),
+            );
         }
     };
 
@@ -180,8 +186,12 @@ async fn send(Json(req): Json<SendReq>) -> Json<Value> {
         Err(e) => {
             let dur = attempt.elapsed_ms();
             let timed_out = e.is_timeout();
-            let (error, log) = attempt.failed("body", &e.without_url(), timed_out, timeout_ms).await;
-            return Json(json!({ "ok": false, "stage": error["stage"], "error": error["message"], "detail": error, "durationMs": dur, "log": log }));
+            let (error, log) = attempt
+                .failed("body", &e.without_url(), timed_out, timeout_ms)
+                .await;
+            return Json(
+                json!({ "ok": false, "stage": error["stage"], "error": error["message"], "detail": error, "durationMs": dur, "log": log }),
+            );
         }
     };
     let duration_ms = attempt.elapsed_ms();
@@ -214,10 +224,17 @@ async fn send(Json(req): Json<SendReq>) -> Json<Value> {
 
     let text = String::from_utf8_lossy(&buf);
     let truncated = text.len() > BODY_MAX;
-    let shown: String = text.chars().scan(0usize, |n, ch| {
-        *n += ch.len_utf8();
-        if *n > BODY_MAX { None } else { Some(ch) }
-    }).collect();
+    let shown: String = text
+        .chars()
+        .scan(0usize, |n, ch| {
+            *n += ch.len_utf8();
+            if *n > BODY_MAX {
+                None
+            } else {
+                Some(ch)
+            }
+        })
+        .collect();
     let log = attempt.succeeded(Reply {
         status: status.as_u16(),
         headers: &resp_headers,
@@ -316,7 +333,12 @@ mod tests {
         let big = format!("[{}]", vec!["1"; 30_000].join(","));
         let logged = logged_response(&big);
         let s = logged.as_str().expect("cut to text");
-        assert!(s.len() < LOGGED_BODY_MAX + 100 && s.ends_with(&format!("({} bytes in all)", big.len())), "{}", &s[s.len() - 40..]);
+        assert!(
+            s.len() < LOGGED_BODY_MAX + 100
+                && s.ends_with(&format!("({} bytes in all)", big.len())),
+            "{}",
+            &s[s.len() - 40..]
+        );
         assert_eq!(logged_response("{\"a\":1}"), json!({ "a": 1 }));
     }
 
@@ -327,12 +349,17 @@ mod tests {
         let app = Router::new().route(
             "/",
             axum::routing::get(|h: axum::http::HeaderMap| async move {
-                h.get("user-agent").map(|v| v.to_str().unwrap_or("").to_string()).unwrap_or_default()
+                h.get("user-agent")
+                    .map(|v| v.to_str().unwrap_or("").to_string())
+                    .unwrap_or_default()
             }),
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let ask = |headers: Value| {
-            let req: SendReq = serde_json::from_value(json!({ "url": format!("http://{addr}/"), "headers": headers })).unwrap();
+            let req: SendReq = serde_json::from_value(
+                json!({ "url": format!("http://{addr}/"), "headers": headers }),
+            )
+            .unwrap();
             send(Json(req))
         };
         let Json(out) = ask(json!({})).await;
@@ -344,11 +371,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_send_never_records_the_url_query_in_its_chain() {
-        let req: SendReq = serde_json::from_value(json!({ "url": "http://127.0.0.1:9/x?token=s3cret" })).unwrap();
+        let req: SendReq =
+            serde_json::from_value(json!({ "url": "http://127.0.0.1:9/x?token=s3cret" })).unwrap();
         let Json(out) = send(Json(req)).await;
         assert_eq!(out["ok"], false);
-        assert!(!out["detail"]["chain"].to_string().contains("s3cret"), "{}", out["detail"]["chain"]);
-        assert!(!out["error"].to_string().contains("s3cret"), "{}", out["error"]);
+        assert!(
+            !out["detail"]["chain"].to_string().contains("s3cret"),
+            "{}",
+            out["detail"]["chain"]
+        );
+        assert!(
+            !out["error"].to_string().contains("s3cret"),
+            "{}",
+            out["error"]
+        );
     }
 
     #[test]

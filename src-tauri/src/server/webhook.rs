@@ -10,8 +10,8 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
-use futures_util::stream::Stream;
 use base64::Engine;
+use futures_util::stream::Stream;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -92,13 +92,25 @@ impl Captured {
             + self.curl.len()
             + self.curl_masked.len()
             + self.raw.body.len()
-            + self.headers.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>()
+            + self
+                .headers
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
     }
 
     /// The cURL command with the whole kept body, masked or not.
     fn full_curl(&self, masked: bool) -> String {
-        let url = if masked { &self.raw.masked_url } else { &self.raw.url };
-        let headers = if masked { mask_headers(&self.headers) } else { self.headers.clone() };
+        let url = if masked {
+            &self.raw.masked_url
+        } else {
+            &self.raw.url
+        };
+        let headers = if masked {
+            mask_headers(&self.headers)
+        } else {
+            self.headers.clone()
+        };
         curl_command(&self.method, url, &headers, &self.raw.body)
     }
 }
@@ -146,7 +158,16 @@ fn is_sensitive(name: &str) -> bool {
 fn mask_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
     headers
         .iter()
-        .map(|(k, v)| (k.clone(), if is_sensitive(k) { MASK.to_string() } else { v.clone() }))
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                if is_sensitive(k) {
+                    MASK.to_string()
+                } else {
+                    v.clone()
+                },
+            )
+        })
         .collect()
 }
 
@@ -154,7 +175,9 @@ fn mask_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
 fn mask_query(raw: &str) -> String {
     // the key is judged decoded (`api%5Fkey` is `api_key`) and written back as it came
     let decoded = |k: &str| -> String {
-        url::form_urlencoded::parse(k.as_bytes()).map(|(k, _)| k.into_owned()).collect()
+        url::form_urlencoded::parse(k.as_bytes())
+            .map(|(k, _)| k.into_owned())
+            .collect()
     };
     raw.split('&')
         .map(|pair| match pair.split_once('=') {
@@ -196,10 +219,14 @@ async fn capture(req: Request) -> Response {
     let source = source_of(peer, &parts.headers);
 
     let (kept, body_bytes, body_error) = read_capped(body, BODY_KEEP).await;
-    let body_lossy = std::str::from_utf8(&kept).is_err() && !(body_bytes > BODY_KEEP && utf8_prefix_ok(&kept));
+    let body_lossy =
+        std::str::from_utf8(&kept).is_err() && !(body_bytes > BODY_KEEP && utf8_prefix_ok(&kept));
     let (body, body_base64) = if body_lossy {
         let preview = String::from_utf8_lossy(&kept[..kept.len().min(LOSSY_PREVIEW)]).into_owned();
-        (preview, Some(base64::engine::general_purpose::STANDARD.encode(&kept)))
+        (
+            preview,
+            Some(base64::engine::general_purpose::STANDARD.encode(&kept)),
+        )
     } else {
         (String::from_utf8_lossy(&kept).into_owned(), None)
     };
@@ -212,7 +239,15 @@ async fn capture(req: Request) -> Response {
         .unwrap_or("localhost")
         .to_string();
     let replay_url = |q: &str| {
-        format!("http://{host}{}{}", uri.path(), if q.is_empty() { String::new() } else { format!("?{q}") })
+        format!(
+            "http://{host}{}{}",
+            uri.path(),
+            if q.is_empty() {
+                String::new()
+            } else {
+                format!("?{q}")
+            }
+        )
     };
     let method = parts.method.as_str().to_string();
     let url = replay_url(&raw_query);
@@ -247,7 +282,11 @@ async fn capture(req: Request) -> Response {
         curl,
         curl_masked,
         curl_truncated,
-        raw: Replay { url, masked_url, body: if curl_truncated { kept } else { Vec::new() } },
+        raw: Replay {
+            url,
+            masked_url,
+            body: if curl_truncated { kept } else { Vec::new() },
+        },
     });
 
     keep(&mut lock(&CAPTURED), rec.clone());
@@ -284,7 +323,10 @@ async fn read_capped(body: axum::body::Body, keep: usize) -> (Vec<u8>, usize, Op
         let chunk = match chunk {
             Ok(c) => c,
             Err(e) => {
-                let why = format!("the body stopped after {total} bytes: {}", super::attempt::describe(&e));
+                let why = format!(
+                    "the body stopped after {total} bytes: {}",
+                    super::attempt::describe(&e)
+                );
                 return (kept, total, Some(why));
             }
         };
@@ -385,7 +427,11 @@ fn shell_quote(s: &str) -> String {
 fn curl_command(method: &str, url: &str, headers: &[(String, String)], body: &[u8]) -> String {
     const SKIP: [&str; 4] = ["host", "content-length", "transfer-encoding", "connection"];
     // the method came from the caller: quoted like everything else, so it cannot run commands
-    let mut parts = vec![format!("curl -X {} {}", shell_quote(method), shell_quote(url))];
+    let mut parts = vec![format!(
+        "curl -X {} {}",
+        shell_quote(method),
+        shell_quote(url)
+    )];
     for (k, v) in headers {
         if SKIP.contains(&k.to_ascii_lowercase().as_str()) {
             continue;
@@ -398,9 +444,10 @@ fn curl_command(method: &str, url: &str, headers: &[(String, String)], body: &[u
         Ok("") => {}
         Ok(text) => parts.push(format!("--data-binary {}", shell_quote(text))),
         // a cut-off character at the end is still text
-        Err(e) if e.error_len().is_none() => {
-            parts.push(format!("--data-binary {}", shell_quote(&String::from_utf8_lossy(&body[..e.valid_up_to()]))))
-        }
+        Err(e) if e.error_len().is_none() => parts.push(format!(
+            "--data-binary {}",
+            shell_quote(&String::from_utf8_lossy(&body[..e.valid_up_to()]))
+        )),
         Err(_) => {
             let b64 = base64::engine::general_purpose::STANDARD.encode(body);
             prefix = format!("printf %s {} | base64 --decode | ", shell_quote(&b64));
@@ -428,10 +475,20 @@ async fn curl(axum::extract::Query(q): axum::extract::Query<CurlQuery>) -> Respo
     match hit {
         Some(h) => {
             let masked = q.masked.as_deref() != Some("0");
-            let curl = if h.curl_truncated { h.full_curl(masked) } else if masked { h.curl_masked.clone() } else { h.curl.clone() };
+            let curl = if h.curl_truncated {
+                h.full_curl(masked)
+            } else if masked {
+                h.curl_masked.clone()
+            } else {
+                h.curl.clone()
+            };
             Json(json!({ "ok": true, "id": h.id, "masked": masked, "curl": curl })).into_response()
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({ "ok": false, "error": "no such hit: it was cleared or dropped" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "no such hit: it was cleared or dropped" })),
+        )
+            .into_response(),
     }
 }
 
@@ -442,7 +499,9 @@ async fn clear() -> Json<Value> {
 
 async fn get_config() -> Json<Value> {
     let cfg = lock(&CONFIG).clone();
-    Json(json!({ "ok": true, "status": cfg.status, "contentType": cfg.content_type, "body": cfg.body }))
+    Json(
+        json!({ "ok": true, "status": cfg.status, "contentType": cfg.content_type, "body": cfg.body }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -476,12 +535,19 @@ async fn set_config(Json(b): Json<ConfigReq>) -> Response {
     let status = match parse_status(b.status.as_ref()) {
         Ok(s) => s,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "ok": false, "error": e }))).into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": e })),
+            )
+                .into_response()
         }
     };
     let cfg = RespConfig {
         status,
-        content_type: b.content_type.filter(|s| !s.is_empty()).unwrap_or_else(|| "application/json".into()),
+        content_type: b
+            .content_type
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "application/json".into()),
         body: b.body.unwrap_or_default(),
     };
     *lock(&CONFIG) = cfg.clone();
@@ -530,7 +596,10 @@ mod tests {
         let mut h = HeaderMap::new();
         h.append("x-tag", "a".parse().unwrap());
         h.append("x-tag", "b".parse().unwrap());
-        h.append("x-raw", axum::http::HeaderValue::from_bytes(b"caf\xe9").unwrap());
+        h.append(
+            "x-raw",
+            axum::http::HeaderValue::from_bytes(b"caf\xe9").unwrap(),
+        );
         let (list, lossy) = header_list(&h);
         assert_eq!(list.iter().filter(|(k, _)| k == "x-tag").count(), 2);
         let raw = &list.iter().find(|(k, _)| k == "x-raw").unwrap().1;
@@ -572,7 +641,10 @@ mod tests {
         assert!(!c.contains("\n\n"), "{c}");
         assert!(c.lines().all(|l| !l.trim().is_empty()), "{c}");
         assert!(c.contains("'x-quote: it'\\''s'"), "{c}");
-        assert!(c.contains("--data-binary $'{\"a\":1}\\n\\n{\"b\":2}'"), "{c}");
+        assert!(
+            c.contains("--data-binary $'{\"a\":1}\\n\\n{\"b\":2}'"),
+            "{c}"
+        );
         assert!(!c.to_lowercase().contains("-h 'host:"), "{c}");
         let lines: Vec<&str> = c.lines().collect();
         for l in &lines[..lines.len() - 1] {
@@ -583,7 +655,10 @@ mod tests {
     #[test]
     fn a_proxy_claim_is_labelled() {
         let mut h = HeaderMap::new();
-        assert_eq!(source_of(Some("10.0.0.2".into()), &h), Some("10.0.0.2".into()));
+        assert_eq!(
+            source_of(Some("10.0.0.2".into()), &h),
+            Some("10.0.0.2".into())
+        );
         h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
         assert_eq!(
             source_of(None, &h),
@@ -611,20 +686,33 @@ mod tests {
     async fn a_body_that_breaks_off_is_marked() {
         let chunks: Vec<Result<&'static [u8], std::io::Error>> = vec![
             Ok(b"abc"),
-            Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "connection reset",
+            )),
         ];
         let body = axum::body::Body::from_stream(futures_util::stream::iter(chunks));
         let (kept, total, err) = read_capped(body, 10).await;
         assert_eq!((kept.as_slice(), total), (&b"abc"[..], 3));
         let err = err.expect("a body error");
-        assert!(err.contains("after 3 bytes") && err.contains("connection reset"), "{err}");
+        assert!(
+            err.contains("after 3 bytes") && err.contains("connection reset"),
+            "{err}"
+        );
     }
 
     #[test]
     fn credentials_are_masked_in_the_shared_curl() {
-        assert!(is_sensitive("Authorization") && is_sensitive("x-hub-signature-256") && is_sensitive("cookie"));
+        assert!(
+            is_sensitive("Authorization")
+                && is_sensitive("x-hub-signature-256")
+                && is_sensitive("cookie")
+        );
         assert!(!is_sensitive("content-type"));
-        assert_eq!(mask_query("a=1&access_token=s3cret&api%5Fkey=k"), "a=1&access_token=•••&api%5Fkey=•••");
+        assert_eq!(
+            mask_query("a=1&access_token=s3cret&api%5Fkey=k"),
+            "a=1&access_token=•••&api%5Fkey=•••"
+        );
         assert_eq!(mask_query(""), "");
     }
 
@@ -646,7 +734,11 @@ mod tests {
             body_base64: None,
             body_error: None,
             source: None,
-            response: SentResponse { status: 200, content_type: String::new(), body: String::new() },
+            response: SentResponse {
+                status: 200,
+                content_type: String::new(),
+                body: String::new(),
+            },
             curl: String::new(),
             curl_masked: String::new(),
             curl_truncated: false,
@@ -666,7 +758,11 @@ mod tests {
         for i in 0..100 {
             keep(&mut list, hit(i, BODY_KEEP));
         }
-        assert!(list.iter().map(|r| r.weight()).sum::<usize>() <= STORE_MAX, "{}", list.len());
+        assert!(
+            list.iter().map(|r| r.weight()).sum::<usize>() <= STORE_MAX,
+            "{}",
+            list.len()
+        );
         assert_eq!(list[0].id, 99);
         let mut list = Vec::new();
         keep(&mut list, hit(0, STORE_MAX * 2));
@@ -684,29 +780,89 @@ mod tests {
         };
         let client = reqwest::Client::new();
         let big = vec![b'a'; BODY_KEEP + 10];
-        client.post(format!("http://{addr}/api/webhook/in/big?token=t1")).header("authorization", "Bearer s3cret").body(big).send().await.unwrap();
+        client
+            .post(format!("http://{addr}/api/webhook/in/big?token=t1"))
+            .header("authorization", "Bearer s3cret")
+            .body(big)
+            .send()
+            .await
+            .unwrap();
         let bin = vec![0xffu8, 0x00, 0x10];
-        client.post(format!("http://{addr}/api/webhook/in/bin")).body(bin).send().await.unwrap();
+        client
+            .post(format!("http://{addr}/api/webhook/in/bin"))
+            .body(bin)
+            .send()
+            .await
+            .unwrap();
 
-        let list: Value = client.get(format!("http://{addr}/api/webhook/list")).send().await.unwrap().bytes().await.map(|b| serde_json::from_slice(&b).unwrap()).unwrap();
+        let list: Value = client
+            .get(format!("http://{addr}/api/webhook/list"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .map(|b| serde_json::from_slice(&b).unwrap())
+            .unwrap();
         let hits = list["captured"].as_array().unwrap();
         let big = hits.iter().find(|h| h["path"] == "/big").unwrap();
-        assert_eq!((big["bodyBytes"].as_u64(), big["bodyKeptBytes"].as_u64(), big["bodyTruncated"].as_bool()), (Some(BODY_KEEP as u64 + 10), Some(BODY_KEEP as u64), Some(true)));
+        assert_eq!(
+            (
+                big["bodyBytes"].as_u64(),
+                big["bodyKeptBytes"].as_u64(),
+                big["bodyTruncated"].as_bool()
+            ),
+            (
+                Some(BODY_KEEP as u64 + 10),
+                Some(BODY_KEEP as u64),
+                Some(true)
+            )
+        );
         assert_eq!(big["curlTruncated"], true);
         assert!(big["curl"].as_str().unwrap().len() < CURL_BODY_MAX + 1024);
         assert!(big.get("bodyBase64").is_none());
         let bin = hits.iter().find(|h| h["path"] == "/bin").unwrap();
         assert_eq!(bin["bodyLossy"], true);
         assert_eq!(bin["bodyBase64"], "/wAQ");
-        assert!(bin["curl"].as_str().unwrap().starts_with("printf %s '/wAQ' | base64 --decode | curl"), "{}", bin["curl"]);
+        assert!(
+            bin["curl"]
+                .as_str()
+                .unwrap()
+                .starts_with("printf %s '/wAQ' | base64 --decode | curl"),
+            "{}",
+            bin["curl"]
+        );
 
         let id = big["id"].as_u64().unwrap();
-        let full: Value = client.get(format!("http://{addr}/api/webhook/curl?id={id}")).send().await.unwrap().bytes().await.map(|b| serde_json::from_slice(&b).unwrap()).unwrap();
+        let full: Value = client
+            .get(format!("http://{addr}/api/webhook/curl?id={id}"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .map(|b| serde_json::from_slice(&b).unwrap())
+            .unwrap();
         let c = full["curl"].as_str().unwrap();
-        assert!(c.len() > BODY_KEEP && !c.contains("s3cret") && !c.contains("t1"), "masked by default");
-        let raw: Value = client.get(format!("http://{addr}/api/webhook/curl?id={id}&masked=0")).send().await.unwrap().bytes().await.map(|b| serde_json::from_slice(&b).unwrap()).unwrap();
+        assert!(
+            c.len() > BODY_KEEP && !c.contains("s3cret") && !c.contains("t1"),
+            "masked by default"
+        );
+        let raw: Value = client
+            .get(format!("http://{addr}/api/webhook/curl?id={id}&masked=0"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .map(|b| serde_json::from_slice(&b).unwrap())
+            .unwrap();
         assert!(raw["curl"].as_str().unwrap().contains("s3cret"));
-        let missing = client.get(format!("http://{addr}/api/webhook/curl?id=999999999")).send().await.unwrap();
+        let missing = client
+            .get(format!("http://{addr}/api/webhook/curl?id=999999999"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(missing.status(), 404);
     }
 
