@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::extract::Query;
 use axum::routing::{get, post};
@@ -8,6 +8,8 @@ use axum::{Json, Router};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+use super::attempt::{Attempt, Reply};
 
 pub fn routes() -> Router {
     Router::new()
@@ -721,24 +723,99 @@ struct DirectOk {
     trailers: HashMap<String, String>,
 }
 
-struct DirectErr {
-    code: i32,
-    details: String,
-    trailers: HashMap<String, String>,
-    /// `grpc-status-details-bin`, when the server attached a `google.rpc.Status`.
-    status_bin: Vec<u8>,
+/// How a direct call failed.
+enum DirectErr {
+    /// Refused before anything was sent: a bad target, the TLS setup, a bad method path.
+    NotSent(String),
+    /// Broke in Conduit or on the way, never answered by the server: the cause chain, and
+    /// whether it was Conduit's own timeout.
+    Failed { chain: Vec<String>, timed_out: bool },
+    /// A status the server sent.
+    Status {
+        code: i32,
+        details: String,
+        trailers: HashMap<String, String>,
+        /// `grpc-status-details-bin`, when the server attached a `google.rpc.Status`.
+        status_bin: Vec<u8>,
+    },
 }
 
-fn md_to_obj(md: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
+impl DirectErr {
+    fn from_status(status: &tonic::Status) -> Self {
+        if let Some((chain, timed_out)) = local_failure(status) {
+            return Self::Failed { chain, timed_out };
+        }
+        Self::Status {
+            code: status.code() as i32,
+            details: if status.message().is_empty() { status.code().to_string() } else { status.message().to_string() },
+            trailers: md_to_obj(status.metadata()),
+            status_bin: status.details().to_vec(),
+        }
+    }
+}
+
+/// Whether a failed call's status was made on this side rather than sent by the server, and if
+/// so its cause chain and whether it was Conduit's own timeout. tonic builds a status for
+/// Conduit's timeout and for a transport error after connecting, and keeps the cause as its
+/// `source()`; a status the server sent has none.
+pub(super) fn local_failure(status: &tonic::Status) -> Option<(Vec<String>, bool)> {
+    let source = std::error::Error::source(status)?;
+    let mut chain = super::attempt::chain(source);
+    if chain.is_empty() {
+        chain.push(status.message().to_string());
+    }
+    Some((chain, conduit_timed_out(source)))
+}
+
+/// Whether `err` or a cause under it is one of Conduit's own time limits (the call's timeout,
+/// or the connect timeout) running out.
+pub(super) fn conduit_timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut cur = Some(err);
+    while let Some(e) = cur {
+        if e.is::<tonic::TimeoutExpired>() || e.is::<tokio::time::error::Elapsed>() {
+            return true;
+        }
+        cur = e.source();
+    }
+    false
+}
+
+/// Text metadata as a map. A value with bytes outside visible ASCII is kept, lossily, instead
+/// of being dropped.
+pub(super) fn md_to_obj(md: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for kv in md.iter() {
         if let tonic::metadata::KeyAndValueRef::Ascii(k, v) = kv {
-            if let Ok(s) = v.to_str() {
-                out.insert(k.as_str().to_string(), s.to_string());
-            }
+            out.insert(k.as_str().to_string(), super::http::header_text(v.as_bytes()));
         }
     }
     out
+}
+
+/// The caller's headers as gRPC metadata. A key ending in `-bin` carries its value as bytes; a
+/// name or value a header cannot carry is refused, never dropped.
+pub(super) fn apply_metadata(md: &mut tonic::metadata::MetadataMap, headers: &HashMap<String, String>) -> Result<(), String> {
+    use tonic::metadata::{AsciiMetadataKey, BinaryMetadataKey, BinaryMetadataValue, MetadataValue};
+    let mut names: Vec<&String> = headers.keys().collect();
+    names.sort();
+    for k in names {
+        let v = &headers[k];
+        let kl = k.to_lowercase();
+        if v.is_empty() || kl == "content-type" || kl == "x-grpc-web" {
+            continue;
+        }
+        if kl.ends_with("-bin") {
+            let key = BinaryMetadataKey::from_bytes(kl.as_bytes()).map_err(|_| format!("metadata name {k:?} is not a valid gRPC metadata key"))?;
+            md.insert_bin(key, BinaryMetadataValue::from_bytes(v.as_bytes()));
+            continue;
+        }
+        let key = AsciiMetadataKey::from_bytes(kl.as_bytes()).map_err(|_| format!("metadata name {k:?} is not a valid gRPC metadata key (lowercase letters, digits, - _ .)"))?;
+        let val = MetadataValue::try_from(v.as_str()).map_err(|_| {
+            format!("metadata {k:?} has characters a metadata value cannot carry (a line break or another control character): send it under a key ending in -bin to send its bytes")
+        })?;
+        md.insert(key, val);
+    }
+    Ok(())
 }
 
 async fn call_direct(
@@ -746,54 +823,37 @@ async fn call_direct(
     payload: Vec<u8>,
     timeout_ms: u64,
 ) -> Result<DirectOk, DirectErr> {
+    use super::attempt::{chain, describe};
     let target = req.target.clone().unwrap_or_default();
     let target = target.trim().to_string();
     let plaintext = req.plaintext.unwrap_or(true);
     let scheme = if plaintext { "http" } else { "https" };
     let uri = format!("{scheme}://{target}");
 
-    let mut ep = match tonic::transport::Channel::from_shared(uri) {
-        Ok(e) => e,
-        Err(e) => {
-            return Err(DirectErr { code: 2, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() });
-        }
-    };
+    let grpc_path = req.grpc_path.clone().unwrap_or_default();
+    let path = http::uri::PathAndQuery::from_maybe_shared(grpc_path.clone())
+        .map_err(|e| DirectErr::NotSent(format!("bad method path {grpc_path:?}: {}", describe(&e))))?;
+    let mut ep = tonic::transport::Channel::from_shared(uri)
+        .map_err(|e| DirectErr::NotSent(format!("bad target {target:?}: {}", describe(&e))))?;
     ep = ep.timeout(Duration::from_millis(timeout_ms)).connect_timeout(Duration::from_millis(timeout_ms));
     if !plaintext {
-        match ep.tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots()) {
-            Ok(e) => ep = e,
-            Err(e) => return Err(DirectErr { code: 2, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() }),
-        }
+        ep = ep
+            .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
+            .map_err(|e| DirectErr::NotSent(format!("TLS setup failed: {}", describe(&e))))?;
     }
 
-    let channel = match ep.connect().await {
-        Ok(c) => c,
-        Err(e) => return Err(DirectErr { code: 14, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() }),
-    };
+    let channel = ep
+        .connect()
+        .await
+        .map_err(|e| DirectErr::Failed { chain: chain(&e), timed_out: conduit_timed_out(&e) })?;
 
     let mut grpc = tonic::client::Grpc::new(channel);
-    if let Err(e) = grpc.ready().await {
-        return Err(DirectErr { code: 14, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() });
-    }
+    grpc.ready()
+        .await
+        .map_err(|e| DirectErr::Failed { chain: chain(&e), timed_out: conduit_timed_out(&e) })?;
 
     let mut request = tonic::Request::new(payload);
-    for (k, v) in req.headers.clone().unwrap_or_default() {
-        let kl = k.to_lowercase();
-        if v.is_empty() || kl == "content-type" || kl == "x-grpc-web" {
-            continue;
-        }
-        if let (Ok(key), Ok(val)) = (
-            kl.parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>(),
-            v.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>(),
-        ) {
-            request.metadata_mut().insert(key, val);
-        }
-    }
-
-    let path = match http::uri::PathAndQuery::from_maybe_shared(req.grpc_path.clone().unwrap_or_default()) {
-        Ok(p) => p,
-        Err(e) => return Err(DirectErr { code: 3, details: format!("{e}"), trailers: HashMap::new(), status_bin: Vec::new() }),
-    };
+    apply_metadata(request.metadata_mut(), &req.headers.clone().unwrap_or_default()).map_err(DirectErr::NotSent)?;
 
     match grpc.unary(request, path, RawCodec).await {
         Ok(resp) => {
@@ -803,12 +863,7 @@ async fn call_direct(
             let trailers = md_to_obj(&meta);
             Ok(DirectOk { resp: body.to_vec(), headers, trailers })
         }
-        Err(status) => Err(DirectErr {
-            code: status.code() as i32,
-            details: if status.message().is_empty() { status.code().to_string() } else { status.message().to_string() },
-            trailers: md_to_obj(status.metadata()),
-            status_bin: status.details().to_vec(),
-        }),
+        Err(status) => Err(DirectErr::from_status(&status)),
     }
 }
 
@@ -902,40 +957,82 @@ async fn call(Json(req): Json<CallReq>) -> Json<Value> {
 }
 
 async fn do_call(req: CallReq) -> Value {
+    let transport = req.transport.clone().unwrap_or_default();
+    let direct = transport == "direct";
+    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(15000);
+    let request_body = Value::String(req.text_body.clone());
+    let target = req.target.as_deref().unwrap_or("").trim().to_string();
+    let grpc_path = req.grpc_path.clone().unwrap_or_default();
+    let scheme = if req.plaintext.unwrap_or(true) { "http" } else { "https" };
+    let direct_url = format!("{scheme}://{target}{grpc_path}");
+    let (method, url) = if direct {
+        ("POST (gRPC)", direct_url.as_str())
+    } else {
+        ("POST (gRPC-Web)", req.url.as_str())
+    };
+
+    // refused before anything is sent: the same failure shape (and record) as a failed call
+    let not_sent = |stage: &str, message: &str| {
+        let attempt = Attempt::start(method, url, req.headers.clone().unwrap_or_default(), request_body.clone(), 0);
+        let (error, log) = attempt.not_sent(stage, message);
+        json!({ "ok": false, "stage": stage, "error": message, "detail": error, "durationMs": 0, "log": log })
+    };
+    if let Some(missing) = direct_missing(direct, &target, &grpc_path) {
+        return not_sent("request", missing);
+    }
+
     let root = match resolve_root(Some(&req.root)) {
         Ok(r) => r,
-        Err(e) => return json!({ "ok": false, "stage": "encode", "error": e }),
+        Err(e) => return not_sent("encode", &e),
     };
 
     let payload = match encode_off_thread(&root, &req.proto, &req.req_type, &req.text_body).await {
         Ok(p) => p,
-        Err(e) => return json!({ "ok": false, "stage": "encode", "error": e }),
+        Err(e) => return not_sent("encode", &e),
     };
 
-    let transport = req.transport.clone().unwrap_or_default();
-    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(15000);
-
-    if transport == "direct" {
-        if req.target.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) || req.grpc_path.as_deref().unwrap_or("").is_empty() {
-            return json!({ "ok": false, "stage": "network", "error": "direct mode needs a target host:port" });
-        }
-        let t0 = Instant::now();
+    if direct {
+        let attempt = Attempt::start(method, url, req.headers.clone().unwrap_or_default(), request_body, payload.len());
         let r = call_direct(&req, payload, timeout_ms).await;
-        let duration_ms = t0.elapsed().as_millis();
+        let duration_ms = attempt.elapsed_ms();
         match r {
-            Err(e) => {
+            Err(DirectErr::NotSent(message)) => {
+                let (error, log) = attempt.not_sent("request", &message);
+                return json!({ "ok": false, "stage": "request", "error": message, "detail": error, "durationMs": duration_ms, "log": log });
+            }
+            Err(DirectErr::Failed { chain, timed_out }) => {
+                let stage = if timed_out { "timeout" } else { "network" };
+                let (error, log) = attempt.failed_with(stage, chain, timed_out, timeout_ms).await;
+                return json!({
+                    "ok": false,
+                    "stage": stage,
+                    "error": error["message"],
+                    "detail": error,
+                    "durationMs": duration_ms,
+                    "log": log,
+                });
+            }
+            Err(DirectErr::Status { code, details, trailers, status_bin }) => {
+                let log = attempt.succeeded(Reply {
+                    status: 200,
+                    headers: &HashMap::new(),
+                    trailers: Some(&trailers),
+                    body: json!({ "grpcStatus": code.to_string(), "grpcMessage": details }),
+                    bytes: 0,
+                });
                 return json!({
                     "ok": true,
                     "httpStatus": 200,
-                    "grpcStatus": e.code.to_string(),
-                    "grpcMessage": e.details,
+                    "grpcStatus": code.to_string(),
+                    "grpcMessage": details,
                     "decoded": "",
                     "frames": 0,
                     "rawBytes": 0,
                     "durationMs": duration_ms,
                     "reqHeaders": req.headers,
-                    "trailers": e.trailers,
-                    "statusDetails": super::grpc_status::decode(&e.status_bin, None),
+                    "trailers": trailers,
+                    "statusDetails": super::grpc_status::decode(&status_bin, None),
+                    "log": log,
                 });
             }
             Ok(ok) => {
@@ -947,6 +1044,13 @@ async fn do_call(req: CallReq) -> Value {
                     Ok(s) => s,
                     Err(e) => format!("<decode failed: {e}>"),
                 };
+                let log = attempt.succeeded(Reply {
+                    status: 200,
+                    headers: &ok.headers,
+                    trailers: Some(&ok.trailers),
+                    body: Value::String(decoded.clone()),
+                    bytes: ok.resp.len(),
+                });
                 return json!({
                     "ok": true,
                     "httpStatus": 200,
@@ -959,6 +1063,7 @@ async fn do_call(req: CallReq) -> Value {
                     "reqHeaders": req.headers,
                     "headers": ok.headers,
                     "trailers": ok.trailers,
+                    "log": log,
                 });
             }
         }
@@ -973,39 +1078,51 @@ async fn do_call(req: CallReq) -> Value {
             headers.insert(k.to_lowercase(), v);
         }
     }
+    headers.entry("user-agent".into()).or_insert_with(super::http::user_agent);
+    let body = frame(&payload);
+    let attempt = Attempt::start("POST (gRPC-Web)", &req.url, headers.clone(), request_body, body.len());
 
     let client = match reqwest::Client::builder().timeout(Duration::from_millis(timeout_ms)).build() {
         Ok(c) => c,
-        Err(e) => return json!({ "ok": false, "stage": "network", "error": format!("{e}") }),
+        Err(e) => {
+            let (error, log) = attempt.not_sent("request", &super::attempt::describe(&e));
+            return json!({ "ok": false, "stage": "request", "error": error["message"], "detail": error, "durationMs": attempt.elapsed_ms(), "log": log });
+        }
     };
 
     let mut hmap = reqwest::header::HeaderMap::new();
     for (k, v) in &headers {
-        if let (Ok(name), Ok(val)) = (
+        match (
             reqwest::header::HeaderName::from_bytes(k.as_bytes()),
             reqwest::header::HeaderValue::from_str(v),
         ) {
-            hmap.insert(name, val);
+            (Ok(name), Ok(val)) => {
+                hmap.insert(name, val);
+            }
+            _ => {
+                let message = format!("header {k:?} cannot be sent: its name or value has characters an HTTP header cannot carry (only visible ASCII)");
+                let (error, log) = attempt.not_sent("request", &message);
+                return json!({ "ok": false, "stage": "request", "error": message, "detail": error, "durationMs": 0, "log": log });
+            }
         }
     }
 
-    let t0 = Instant::now();
-    let resp = client.post(&req.url).headers(hmap).body(frame(&payload)).send().await;
+    let resp = client.post(&req.url).headers(hmap).body(body).send().await;
     let resp = match resp {
         Ok(r) => r,
         Err(e) => {
-            let duration_ms = t0.elapsed().as_millis();
-            if e.is_timeout() {
-                return json!({ "ok": false, "stage": "timeout", "error": format!("request aborted after {timeout_ms}ms"), "durationMs": duration_ms });
-            }
-            return json!({ "ok": false, "stage": "network", "error": e.to_string(), "durationMs": duration_ms });
+            let duration_ms = attempt.elapsed_ms();
+            let timed_out = e.is_timeout();
+            let stage = if timed_out { "timeout" } else { "network" };
+            let (error, log) = attempt.failed(stage, &e.without_url(), timed_out, timeout_ms).await;
+            return json!({ "ok": false, "stage": stage, "error": error["message"], "detail": error, "durationMs": duration_ms, "log": log });
         }
     };
 
     let status = resp.status().as_u16();
     let mut resp_headers: HashMap<String, String> = HashMap::new();
     for (k, v) in resp.headers().iter() {
-        resp_headers.insert(k.as_str().to_string(), v.to_str().unwrap_or("").to_string());
+        resp_headers.insert(k.as_str().to_string(), super::http::header_text(v.as_bytes()));
     }
     let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let header_grpc_status = resp.headers().get("grpc-status").and_then(|v| v.to_str().ok()).map(|s| s.to_string());
@@ -1014,18 +1131,25 @@ async fn do_call(req: CallReq) -> Value {
     let buf = match resp.bytes().await {
         Ok(b) => b.to_vec(),
         Err(e) => {
-            let duration_ms = t0.elapsed().as_millis();
-            return json!({ "ok": false, "stage": "network", "error": e.to_string(), "durationMs": duration_ms });
+            let duration_ms = attempt.elapsed_ms();
+            let timed_out = e.is_timeout();
+            let (error, log) = attempt.failed("body", &e.without_url(), timed_out, timeout_ms).await;
+            return json!({ "ok": false, "stage": error["stage"], "error": error["message"], "detail": error, "durationMs": duration_ms, "log": log });
         }
     };
-    let duration_ms = t0.elapsed().as_millis();
+    let duration_ms = attempt.elapsed_ms();
 
     if !ct.contains("grpc") {
         let mut text = String::from_utf8_lossy(&buf).to_string();
-        if text.len() > 2000 {
-            text.truncate(2000);
-        }
-        return json!({ "ok": false, "stage": "gateway", "httpStatus": status, "error": text, "durationMs": duration_ms });
+        cut_at_char_boundary(&mut text, 2000);
+        let log = attempt.succeeded(Reply {
+            status,
+            headers: &resp_headers,
+            trailers: None,
+            body: Value::String(text.clone()),
+            bytes: buf.len(),
+        });
+        return json!({ "ok": false, "stage": "gateway", "httpStatus": status, "error": text, "durationMs": duration_ms, "log": log });
     }
 
     let (frames, trailers) = deframe(&buf);
@@ -1047,13 +1171,21 @@ async fn do_call(req: CallReq) -> Value {
             parts.push(text);
         }
     }
+    let decoded = parts.join("\n");
+    let log = attempt.succeeded(Reply {
+        status,
+        headers: &resp_headers,
+        trailers: Some(&trailers),
+        body: json!({ "grpcStatus": grpc_status, "grpcMessage": grpc_message, "message": decoded }),
+        bytes: buf.len(),
+    });
 
     json!({
         "ok": true,
         "httpStatus": status,
         "grpcStatus": grpc_status,
         "grpcMessage": grpc_message,
-        "decoded": parts.join("\n"),
+        "decoded": decoded,
         "frames": parts.len(),
         "rawBytes": buf.len(),
         "durationMs": duration_ms,
@@ -1064,5 +1196,130 @@ async fn do_call(req: CallReq) -> Value {
             .or_else(|| resp_headers.get("grpc-status-details-bin"))
             .and_then(|b| super::grpc_status::decode_trailer(b, None)),
         "trailers": trailers,
+        "log": log,
     })
+}
+
+/// What a direct call is missing before it can be sent, if anything.
+fn direct_missing(direct: bool, target: &str, grpc_path: &str) -> Option<&'static str> {
+    match (direct, target.is_empty(), grpc_path.is_empty()) {
+        (false, ..) => None,
+        (true, true, true) => Some("direct mode needs a target host:port and a method"),
+        (true, true, false) => Some("direct mode needs a target host:port"),
+        (true, false, true) => Some("direct mode needs a method (its /package.Service/Method path)"),
+        (true, false, false) => None,
+    }
+}
+
+/// Shorten `text` to at most `max` bytes without splitting a character: `String::truncate`
+/// panics when `max` falls inside a multi-byte character.
+fn cut_at_char_boundary(text: &mut String, max: usize) {
+    if text.len() <= max {
+        return;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conduits_own_timeout_is_a_timeout_not_a_server_status() {
+        // Arrange: the status tonic builds when the channel's timeout runs out
+        let status = tonic::Status::from_error(Box::new(tonic::TimeoutExpired(())));
+        // Act
+        let failure = local_failure(&status);
+        // Assert
+        let (chain, timed_out) = failure.expect("made on this side");
+        assert!(timed_out);
+        assert_eq!(chain, vec!["Timeout expired".to_string()]);
+    }
+
+    #[test]
+    fn a_transport_error_after_connecting_is_a_network_failure() {
+        let io = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset by peer");
+        let status = tonic::Status::from_error(Box::new(io));
+        let (chain, timed_out) = local_failure(&status).expect("made on this side");
+        assert!(!timed_out);
+        assert!(chain.iter().any(|c| c.contains("connection reset")), "{chain:?}");
+    }
+
+    #[test]
+    fn a_status_the_server_sent_stays_a_status() {
+        assert!(local_failure(&tonic::Status::not_found("no such user")).is_none());
+        assert!(matches!(
+            DirectErr::from_status(&tonic::Status::not_found("no such user")),
+            DirectErr::Status { code: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn direct_mode_names_what_is_missing() {
+        assert_eq!(direct_missing(false, "", ""), None);
+        assert_eq!(direct_missing(true, "h:1", "/a.B/C"), None);
+        assert_eq!(direct_missing(true, "h:1", ""), Some("direct mode needs a method (its /package.Service/Method path)"));
+        assert_eq!(direct_missing(true, "", "/a.B/C"), Some("direct mode needs a target host:port"));
+    }
+
+    #[test]
+    fn metadata_with_non_ascii_bytes_is_kept() {
+        let mut md = tonic::metadata::MetadataMap::new();
+        md.insert("x-name", tonic::metadata::MetadataValue::try_from("caf\u{e9}".as_bytes()).unwrap());
+        assert_eq!(md_to_obj(&md)["x-name"], "caf\u{e9}");
+    }
+
+    #[test]
+    fn non_ascii_metadata_is_refused_or_sent_as_bytes_never_dropped() {
+        let mut md = tonic::metadata::MetadataMap::new();
+        let mut h = HashMap::new();
+        h.insert("x-name".to_string(), "line\nbreak".to_string());
+        let e = apply_metadata(&mut md, &h).unwrap_err();
+        assert!(e.contains("x-name") && e.contains("-bin"), "{e}");
+        let mut h = HashMap::new();
+        h.insert("bad key".to_string(), "v".to_string());
+        assert!(apply_metadata(&mut md, &h).unwrap_err().contains("bad key"));
+        let mut h = HashMap::new();
+        h.insert("x-utf8".to_string(), "caf\u{e9}".to_string());
+        apply_metadata(&mut md, &h).unwrap();
+        assert_eq!(md.get("x-utf8").unwrap().as_bytes(), "caf\u{e9}".as_bytes());
+        let mut h = HashMap::new();
+        h.insert("x-name-bin".to_string(), "caf\u{e9}".to_string());
+        h.insert("x-plain".to_string(), "ok".to_string());
+        apply_metadata(&mut md, &h).unwrap();
+        assert_eq!(md.get_bin("x-name-bin").unwrap().to_bytes().unwrap().as_ref(), "caf\u{e9}".as_bytes());
+        assert_eq!(md.get("x-plain").unwrap(), "ok");
+    }
+
+    #[tokio::test]
+    async fn a_bad_direct_target_is_not_sent_rather_than_a_server_reply() {
+        let req: CallReq = serde_json::from_value(json!({
+            "transport": "direct",
+            "target": "bad host:1",
+            "grpcPath": "/a.B/C",
+        }))
+        .unwrap();
+        let out = match call_direct(&req, Vec::new(), 1000).await {
+            Err(DirectErr::NotSent(m)) => m,
+            _ => panic!("expected a refusal before sending"),
+        };
+        assert!(out.contains("bad target"), "{out}");
+    }
+
+    #[test]
+    fn a_long_non_ascii_page_is_cut_without_splitting_a_character() {
+        // "€" is 3 bytes, so 2000 falls inside a character
+        let mut text = "€".repeat(1000);
+        cut_at_char_boundary(&mut text, 2000);
+        assert_eq!(text.len(), 1998);
+        assert!(text.chars().all(|c| c == '€'));
+
+        let mut short = "ok".to_string();
+        cut_at_char_boundary(&mut short, 2000);
+        assert_eq!(short, "ok");
+    }
 }

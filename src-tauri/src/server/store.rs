@@ -28,7 +28,7 @@ fn file() -> PathBuf {
 
 pub fn routes() -> Router {
     Router::new()
-        .route("/", get(read).put(write).delete(wipe))
+        .route("/", get(read).put(write).post(beacon).delete(wipe))
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
 }
 
@@ -45,6 +45,20 @@ struct WriteParams {
 }
 
 async fn write(Query(params): Query<WriteParams>, Json(body): Json<Value>) -> Json<Value> {
+    save(params, body)
+}
+
+/// The same save as PUT, for `navigator.sendBeacon` on pagehide: a POST whose JSON body may be
+/// labelled `text/plain` (a beacon cannot set `application/json` without a CORS preflight).
+async fn beacon(Query(params): Query<WriteParams>, body: axum::body::Bytes) -> Json<Value> {
+    match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => save(params, v),
+        Ok(_) => Json(json!({ "ok": false, "error": "the body is JSON but not an object" })),
+        Err(e) => Json(json!({ "ok": false, "error": format!("the body is not JSON: {e}") })),
+    }
+}
+
+fn save(params: WriteParams, body: Value) -> Json<Value> {
     let f = file();
     let res = serde_json::to_string_pretty(&body)
         .map_err(|e| e.to_string())
@@ -88,6 +102,22 @@ mod tests {
         let body: Value = serde_json::from_slice(&res.bytes().await.unwrap()).unwrap();
         assert_eq!(body["ok"], true);
         assert!(last_flush() >= 7);
+
+        let beacon = reqwest::Client::new()
+            .post(format!("http://{addr}/?flush=9"))
+            .header("content-type", "text/plain;charset=UTF-8")
+            .body(r#"{"k":"from a beacon"}"#)
+            .send()
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&beacon.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["ok"], true, "{body}");
+        assert!(last_flush() >= 9);
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+        assert_eq!(saved["k"], "from a beacon");
+        let bad = reqwest::Client::new().post(format!("http://{addr}/")).body("not json").send().await.unwrap();
+        let body: Value = serde_json::from_slice(&bad.bytes().await.unwrap()).unwrap();
+        assert_eq!(body["ok"], false);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

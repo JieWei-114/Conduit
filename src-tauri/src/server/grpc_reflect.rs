@@ -1,6 +1,4 @@
-// New Cargo deps: tonic = { version = "0.12", features = ["tls", "tls-roots"] }, tonic-reflection = "0.12", prost = "0.13", prost-reflect = { version = "0.14", features = ["serde"] }, prost-types = "0.13", bytes = "1", http = "1"
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
 use axum::{routing::post, Json, Router};
 use bytes::{Buf, BufMut};
@@ -9,6 +7,7 @@ use prost_reflect::{DescriptorPool, DynamicMessage, Kind, MessageDescriptor, Ser
 use prost_types::FileDescriptorProto;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use super::attempt::{Attempt, Reply};
 use tonic::codec::{Codec, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::{Request, Status};
 
@@ -44,35 +43,57 @@ fn endpoint_uri(target: &str, plaintext: Option<bool>) -> String {
     }
 }
 
-async fn connect(target: &str, plaintext: Option<bool>) -> Result<tonic::transport::Channel, String> {
+/// How long a connection may take before the target counts as unreachable.
+const CONNECT_TIMEOUT_MS: u64 = 8000;
+
+/// A channel to `target`. A bad target or TLS setup is refused before anything is sent; a
+/// failed connection keeps the error's whole cause chain, outermost first: tonic's own text is
+/// only "transport error", the reason (refused, timed out, no such host) is in its sources.
+async fn connect(target: &str, plaintext: Option<bool>) -> Result<tonic::transport::Channel, UnaryErr> {
+    use super::attempt::{chain, describe};
     let uri = endpoint_uri(target, plaintext);
-    let mut ep = tonic::transport::Channel::from_shared(uri).map_err(|e| e.to_string())?;
+    let mut ep = tonic::transport::Channel::from_shared(uri)
+        .map_err(|e| UnaryErr::NotSent(format!("bad target {:?}: {}", target.trim(), describe(&e))))?;
     if plaintext == Some(false) {
         ep = ep
             .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| UnaryErr::NotSent(format!("TLS setup failed: {}", describe(&e))))?;
     }
     // a host that never answers would otherwise hold the request for the OS connect timeout
-    ep.connect_timeout(std::time::Duration::from_secs(8))
+    ep.connect_timeout(std::time::Duration::from_millis(CONNECT_TIMEOUT_MS))
         .connect()
         .await
-        .map_err(|e| with_causes(&e))
+        .map_err(|e| UnaryErr::Failed { chain: chain(&e), timed_out: super::grpc::conduit_timed_out(&e) })
 }
 
-/// `e` and every error under it: tonic's own text is only "transport error", the reason
-/// (refused, timed out, no such host) is in its sources.
-fn with_causes(e: &dyn std::error::Error) -> String {
-    let mut out = e.to_string();
-    let mut source = e.source();
-    while let Some(s) = source {
-        let text = s.to_string();
-        if !out.contains(&text) {
-            out.push_str(": ");
-            out.push_str(&text);
+/// The response for a call that did not get an answer from the server: refused before it was
+/// sent, or broken on the way (with the cause chain, hints, a probe of the target), each with
+/// the attempt's record. A server status is not one of these: see [`failed`].
+async fn unreachable(attempt: &Attempt, e: UnaryErr, timeout_ms: u64) -> Value {
+    let duration_ms = attempt.elapsed_ms();
+    let (stage, error, log) = match e {
+        UnaryErr::NotSent(message) => {
+            let (error, log) = attempt.not_sent("request", &message);
+            ("request", error, log)
         }
-        source = s.source();
-    }
-    out
+        UnaryErr::Failed { chain, timed_out } => {
+            let stage = if timed_out { "timeout" } else { "network" };
+            let (error, log) = attempt.failed_with(stage, chain, timed_out, timeout_ms).await;
+            (stage, error, log)
+        }
+        UnaryErr::Status { code, details, .. } => {
+            let (error, log) = attempt.server_refused("call", vec![format!("{code}: {details}")], "reply");
+            ("call", error, log)
+        }
+    };
+    json!({
+        "ok": false,
+        "stage": stage,
+        "error": hint(error["message"].as_str().unwrap_or_default()),
+        "detail": error,
+        "durationMs": duration_ms,
+        "log": log,
+    })
 }
 
 enum ReflectItem {
@@ -176,8 +197,13 @@ async fn reflect_query_alpha(
     Err("empty reflection response".into())
 }
 
+/// A failed reflection call as one line, with the transport's cause chain when the status was
+/// made on this side (a timeout, a reset connection), not sent by the server.
 fn status_string(s: &Status) -> String {
-    format!("{:?}: {}", s.code(), s.message())
+    match super::grpc::local_failure(s) {
+        Some((chain, _)) => format!("{:?}: {}", s.code(), chain.join(": ")),
+        None => format!("{:?}: {}", s.code(), s.message()),
+    }
 }
 
 async fn collect_pool(
@@ -204,7 +230,7 @@ async fn collect_pool(
 
     let mut pool = DescriptorPool::new();
     let files: Vec<FileDescriptorProto> = by_name.into_values().collect();
-    pool.add_file_descriptor_protos(files).map_err(|e| e.to_string())?;
+    pool.add_file_descriptor_protos(files).map_err(|e| super::attempt::describe(&e))?;
     Ok(pool)
 }
 
@@ -216,7 +242,7 @@ fn ingest(
     match item {
         ReflectItem::Files(raw) => {
             for bytes in raw {
-                let fdp = FileDescriptorProto::decode(bytes.as_slice()).map_err(|e| e.to_string())?;
+                let fdp = FileDescriptorProto::decode(bytes.as_slice()).map_err(|e| super::attempt::describe(&e))?;
                 let name = fdp.name().to_string();
                 for dep in &fdp.dependency {
                     if !by_name.contains_key(dep) {
@@ -272,19 +298,30 @@ struct ReflectReq {
 
 async fn reflect(Json(req): Json<ReflectReq>) -> Json<Value> {
     let target = req.target.unwrap_or_default();
+    let url = format!(
+        "{}/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+        endpoint_uri(&target, req.plaintext).trim_end_matches('/')
+    );
+    let attempt = Attempt::start("POST (gRPC reflect)", &url, HashMap::new(), json!({ "listServices": "" }), 0);
     if target.trim().is_empty() {
-        return Json(json!({ "ok": false, "error": "target host:port required" }));
+        let e = UnaryErr::NotSent("target host:port required".into());
+        return Json(unreachable(&attempt, e, CONNECT_TIMEOUT_MS).await);
     }
     let channel = match connect(&target, req.plaintext).await {
         Ok(c) => c,
-        Err(e) => return Json(json!({ "ok": false, "error": hint(&e) })),
+        Err(e) => return Json(unreachable(&attempt, e, CONNECT_TIMEOUT_MS).await),
     };
 
+    let attempt = &attempt;
+    let listing_failed = move |e: String| async move {
+        let duration_ms = attempt.elapsed_ms();
+        let (error, log) = attempt.failed_with("reflection", vec![e.clone()], false, CONNECT_TIMEOUT_MS).await;
+        Json(json!({ "ok": false, "stage": "reflection", "error": hint(&e), "detail": error, "durationMs": duration_ms, "log": log }))
+    };
     let names = match reflect_query(channel.clone(), V1Req::ListServices(String::new())).await {
         Ok(ReflectItem::Services(n)) => n,
-        Ok(ReflectItem::Error(e)) => return Json(json!({ "ok": false, "error": hint(&e) })),
-        Ok(_) => return Json(json!({ "ok": false, "error": "unexpected reflection response" })),
-        Err(e) => return Json(json!({ "ok": false, "error": hint(&e) })),
+        Ok(ReflectItem::Error(e)) | Err(e) => return listing_failed(e).await,
+        Ok(_) => return listing_failed("unexpected reflection response".into()).await,
     };
 
     let mut services = Vec::new();
@@ -372,26 +409,29 @@ struct UnaryOk {
     trailers: HashMap<String, String>,
 }
 
-struct UnaryErr {
-    code: i32,
-    details: String,
-    trailers: HashMap<String, String>,
-    /// `grpc-status-details-bin`, when the server attached a `google.rpc.Status`.
-    status_bin: Vec<u8>,
+/// How a call failed.
+enum UnaryErr {
+    /// Refused before anything was sent: a bad target, the TLS setup, a bad method path.
+    NotSent(String),
+    /// Broke in Conduit or on the way, never answered by the server: the cause chain, and
+    /// whether it was Conduit's own timeout.
+    Failed { chain: Vec<String>, timed_out: bool },
+    /// A status the server sent.
+    Status {
+        code: i32,
+        details: String,
+        trailers: HashMap<String, String>,
+        /// `grpc-status-details-bin`, when the server attached a `google.rpc.Status`.
+        status_bin: Vec<u8>,
+    },
 }
 
 impl UnaryErr {
-    fn new(code: i32, details: impl Into<String>) -> Self {
-        Self {
-            code,
-            details: details.into(),
-            trailers: HashMap::new(),
-            status_bin: Vec::new(),
-        }
-    }
-
     fn from_status(status: &Status) -> Self {
-        Self {
+        if let Some((chain, timed_out)) = super::grpc::local_failure(status) {
+            return Self::Failed { chain, timed_out };
+        }
+        Self::Status {
             code: status.code() as i32,
             details: if status.message().is_empty() {
                 format!("{:?}", status.code())
@@ -400,6 +440,14 @@ impl UnaryErr {
             },
             trailers: md_to_map(status.metadata()),
             status_bin: status.details().to_vec(),
+        }
+    }
+
+    /// Conduit's own deadline ran out before the server answered.
+    fn conduit_timeout(what: &str, timeout_ms: u64) -> Self {
+        Self::Failed {
+            chain: vec![format!("no {what} within {timeout_ms} ms (Conduit's timeout)")],
+            timed_out: true,
         }
     }
 }
@@ -418,15 +466,7 @@ const STREAM_MAX: usize = 500;
 const STREAM_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 fn md_to_map(md: &tonic::metadata::MetadataMap) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    for kv in md.iter() {
-        if let tonic::metadata::KeyAndValueRef::Ascii(k, v) = kv {
-            if let Ok(v) = v.to_str() {
-                out.insert(k.as_str().to_string(), v.to_string());
-            }
-        }
-    }
-    out
+    super::grpc::md_to_obj(md)
 }
 
 /// A request carrying `payload`, the caller's headers as metadata, and the deadline.
@@ -434,22 +474,11 @@ fn build_request(
     payload: Vec<u8>,
     headers: &HashMap<String, String>,
     timeout_ms: u64,
-) -> Request<Vec<u8>> {
+) -> Result<Request<Vec<u8>>, UnaryErr> {
     let mut request = Request::new(payload);
-    for (k, v) in headers {
-        let lk = k.to_lowercase();
-        if v.is_empty() || lk == "content-type" || lk == "x-grpc-web" {
-            continue;
-        }
-        if let (Ok(key), Ok(val)) = (
-            tonic::metadata::MetadataKey::from_bytes(lk.as_bytes()),
-            tonic::metadata::MetadataValue::try_from(v.as_str()),
-        ) {
-            request.metadata_mut().insert(key, val);
-        }
-    }
+    super::grpc::apply_metadata(request.metadata_mut(), headers).map_err(UnaryErr::NotSent)?;
     request.set_timeout(std::time::Duration::from_millis(timeout_ms));
-    request
+    Ok(request)
 }
 
 /// A ready client and the call path.
@@ -464,15 +493,16 @@ async fn client(
     UnaryErr,
 > {
     let mut grpc = tonic::client::Grpc::new(channel);
-    grpc.ready()
-        .await
-        .map_err(|e| UnaryErr::new(14, e.to_string()))?;
+    grpc.ready().await.map_err(|e| UnaryErr::Failed {
+        chain: super::attempt::chain(&e),
+        timed_out: super::grpc::conduit_timed_out(&e),
+    })?;
     // `from_maybe_shared` requires `'static`, and `path` is a borrowed `&str`,
     // so the allocation is load-bearing. Clippy does not weigh that bound and
     // suggests passing the reference, which does not compile.
     #[allow(clippy::unnecessary_to_owned)]
     let path = http::uri::PathAndQuery::from_maybe_shared(path.to_string())
-        .map_err(|e| UnaryErr::new(3, e.to_string()))?;
+        .map_err(|e| UnaryErr::NotSent(format!("bad method path {path:?}: {}", super::attempt::describe(&e))))?;
     Ok((grpc, path))
 }
 
@@ -484,11 +514,11 @@ async fn unary(
     timeout_ms: u64,
 ) -> Result<UnaryOk, UnaryErr> {
     let (mut grpc, path) = client(channel, path).await?;
-    let request = build_request(payload, headers, timeout_ms);
+    let request = build_request(payload, headers, timeout_ms)?;
     // the deadline is also sent to the server, but one that ignores it must not hold the call open
     let call = grpc.unary(request, path, BytesCodec);
     let Ok(answer) = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), call).await else {
-        return Err(UnaryErr::new(4, format!("no answer within {timeout_ms} ms (Conduit's timeout)")));
+        return Err(UnaryErr::conduit_timeout("answer", timeout_ms));
     };
     match answer {
         Ok(resp) => {
@@ -513,12 +543,12 @@ async fn server_stream(
     timeout_ms: u64,
 ) -> Result<StreamOk, UnaryErr> {
     let (mut grpc, path) = client(channel, path).await?;
-    let request = build_request(payload, headers, timeout_ms);
+    let request = build_request(payload, headers, timeout_ms)?;
     // the deadline is also sent to the server, but one that ignores it must not hold the call open
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     let resp = tokio::time::timeout_at(deadline, grpc.server_streaming(request, path, BytesCodec))
         .await
-        .map_err(|_| UnaryErr::new(4, format!("no answer within {timeout_ms} ms (Conduit's timeout)")))?
+        .map_err(|_| UnaryErr::conduit_timeout("answer", timeout_ms))?
         .map_err(|s| UnaryErr::from_status(&s))?;
     let headers = md_to_map(resp.metadata());
     let mut stream = resp.into_inner();
@@ -541,7 +571,7 @@ async fn server_stream(
         }
         let Ok(next) = tokio::time::timeout_at(deadline, stream.message()).await else {
             if messages.is_empty() {
-                return Err(UnaryErr::new(4, format!("no message within {timeout_ms} ms (Conduit's timeout)")));
+                return Err(UnaryErr::conduit_timeout("message", timeout_ms));
             }
             let note = format!(
                 "stopped at the {timeout_ms} ms timeout with the stream still open; showing the {} message(s) received",
@@ -575,9 +605,22 @@ async fn server_stream(
                 });
             }
             Err(status) => {
-                let mut err = UnaryErr::from_status(&status);
-                err.details = format!("{} (after {} message(s))", err.details, messages.len());
-                return Err(err);
+                let after = format!("after {} message(s)", messages.len());
+                return Err(match UnaryErr::from_status(&status) {
+                    UnaryErr::Status { code, details, trailers, status_bin } => UnaryErr::Status {
+                        code,
+                        details: format!("{details} ({after})"),
+                        trailers,
+                        status_bin,
+                    },
+                    UnaryErr::Failed { mut chain, timed_out } => {
+                        if let Some(last) = chain.last_mut() {
+                            *last = format!("{last} ({after})");
+                        }
+                        UnaryErr::Failed { chain, timed_out }
+                    }
+                    other => other,
+                });
             }
         }
     }
@@ -610,51 +653,64 @@ async fn reflect_call(Json(req): Json<CallReq>) -> Json<Value> {
     let target = req.target.unwrap_or_default();
     let service = req.service.unwrap_or_default();
     let method = req.method.unwrap_or_default();
-    if target.trim().is_empty() || service.is_empty() || method.is_empty() {
-        return Json(json!({ "ok": false, "stage": "encode", "error": "target, service and method are required" }));
-    }
 
+    let path = format!("/{service}/{method}");
+    let url = format!("{}{path}", endpoint_uri(&target, req.plaintext).trim_end_matches('/'));
+    let headers = req.headers.clone().unwrap_or_default();
+    let raw = req.request_json.unwrap_or_default();
+    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(15000);
+    let record = |bytes: usize| {
+        Attempt::start("POST (gRPC reflect)", &url, headers.clone(), Value::String(raw.clone()), bytes)
+    };
+
+    // nothing is encoded before the server's descriptors arrive, so a connect failure sent 0 bytes
+    let connecting = record(0);
+    if target.trim().is_empty() || service.is_empty() || method.is_empty() {
+        let e = UnaryErr::NotSent("target, service and method are required".into());
+        return Json(unreachable(&connecting, e, CONNECT_TIMEOUT_MS).await);
+    }
     let channel = match connect(&target, req.plaintext).await {
         Ok(c) => c,
-        Err(e) => return Json(json!({ "ok": false, "stage": "encode", "error": hint(&e) })),
+        Err(e) => return Json(unreachable(&connecting, e, CONNECT_TIMEOUT_MS).await),
+    };
+    // connected, but the call is never sent: the method is unknown or the body does not encode
+    let not_sent = |message: String| {
+        let (error, log) = connecting.not_sent("encode", &message);
+        let ms = connecting.elapsed_ms();
+        Json(json!({ "ok": false, "stage": "encode", "error": message, "detail": error, "durationMs": ms, "log": log }))
     };
 
     let pool = match collect_pool(&channel, &service).await {
         Ok(p) => p,
-        Err(e) => return Json(json!({ "ok": false, "stage": "encode", "error": e })),
+        Err(e) => return not_sent(e),
     };
 
     let sd = match pool.get_service_by_name(&service) {
         Some(s) => s,
-        None => return Json(json!({ "ok": false, "stage": "encode", "error": format!("service {service} not found") })),
+        None => return not_sent(format!("service {service} not found")),
     };
     let md = match sd.methods().find(|m| m.name() == method) {
         Some(m) => m,
-        None => return Json(json!({ "ok": false, "stage": "encode", "error": format!("method {method} not found on {service}") })),
+        None => return not_sent(format!("method {method} not found on {service}")),
     };
     if md.is_client_streaming() {
-        return Json(json!({ "ok": false, "stage": "encode", "error": "client and bidirectional streaming are not supported here — unary and server streaming only" }));
+        return not_sent("client and bidirectional streaming are not supported here — unary and server streaming only".to_string());
     }
 
     let input = md.input();
     let output = md.output();
-    let path = format!("/{service}/{method}");
 
-    let raw = req.request_json.unwrap_or_default();
     let payload = match encode_request(&input, &raw) {
         Ok(p) => p,
-        Err(e) => return Json(json!({ "ok": false, "stage": "encode", "error": e })),
+        Err(e) => return not_sent(e),
     };
 
-    let headers = req.headers.clone().unwrap_or_default();
-    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(15000);
-
-    let t0 = Instant::now();
+    let attempt = record(payload.len());
     if md.is_server_streaming() {
         let result = server_stream(channel, &path, payload, &headers, timeout_ms).await;
-        let duration_ms = t0.elapsed().as_millis() as u64;
+        let duration_ms = attempt.elapsed_ms() as u64;
         return Json(match result {
-            Err(e) => failed(e, &pool, duration_ms, &req.headers),
+            Err(e) => failed(e, &pool, &attempt, timeout_ms, &req.headers).await,
             Ok(ok) => {
                 let total = ok.messages.len();
                 let raw_bytes: usize = ok.messages.iter().map(Vec::len).sum();
@@ -668,33 +724,49 @@ async fn reflect_call(Json(req): Json<CallReq>) -> Json<Value> {
                         format!("──── message {} of {total} ────\n{text}", i + 1)
                     })
                     .collect();
+                let decoded = if total == 0 { "(the stream ended without a message)".to_string() } else { decoded.join("\n") };
+                let log = attempt.succeeded(Reply {
+                    status: 200,
+                    headers: &ok.headers,
+                    trailers: Some(&ok.trailers),
+                    body: Value::String(decoded.clone()),
+                    bytes: raw_bytes,
+                });
                 json!({
                     "ok": true,
                     "httpStatus": 200,
                     "grpcStatus": "0",
                     "grpcMessage": ok.note.clone().unwrap_or_default(),
-                    "decoded": if total == 0 { "(the stream ended without a message)".to_string() } else { decoded.join("\n") },
+                    "decoded": decoded,
                     "frames": total,
                     "rawBytes": raw_bytes,
                     "durationMs": duration_ms,
                     "reqHeaders": req.headers,
                     "headers": ok.headers,
                     "trailers": ok.trailers,
+                    "log": log,
                 })
             }
         });
     }
     let result = unary(channel, &path, payload, &headers, timeout_ms).await;
-    let duration_ms = t0.elapsed().as_millis() as u64;
+    let duration_ms = attempt.elapsed_ms() as u64;
 
     match result {
-        Err(e) => Json(failed(e, &pool, duration_ms, &req.headers)),
+        Err(e) => Json(failed(e, &pool, &attempt, timeout_ms, &req.headers).await),
         Ok(ok) => {
             let raw_bytes = ok.resp.len();
             let decoded = match decode_response(&output, &ok.resp) {
                 Ok(s) => s,
                 Err(e) => format!("<decode failed: {e}>"),
             };
+            let log = attempt.succeeded(Reply {
+                status: 200,
+                headers: &ok.headers,
+                trailers: Some(&ok.trailers),
+                body: Value::String(decoded.clone()),
+                bytes: raw_bytes,
+            });
             Json(json!({
                 "ok": true,
                 "httpStatus": 200,
@@ -707,31 +779,45 @@ async fn reflect_call(Json(req): Json<CallReq>) -> Json<Value> {
                 "reqHeaders": req.headers,
                 "headers": ok.headers,
                 "trailers": ok.trailers,
+                "log": log,
             }))
         }
     }
 }
 
-/// The response for a call the server answered with an error status, with its rich error
-/// details decoded against the server's descriptors when it sent any.
-fn failed(
+/// The response for a call that failed: one that was not sent or never got an answer as that
+/// failure (see [`unreachable`]); one the server answered with an error status as that status,
+/// with its rich error details decoded against the server's descriptors when it sent any.
+async fn failed(
     e: UnaryErr,
     pool: &DescriptorPool,
-    duration_ms: u64,
+    attempt: &Attempt,
+    timeout_ms: u64,
     req_headers: &Option<HashMap<String, String>>,
 ) -> Value {
+    let UnaryErr::Status { code, details, trailers, status_bin } = e else {
+        return unreachable(attempt, e, timeout_ms).await;
+    };
+    let log = attempt.succeeded(Reply {
+        status: 200,
+        headers: &HashMap::new(),
+        trailers: Some(&trailers),
+        body: json!({ "grpcStatus": code.to_string(), "grpcMessage": details }),
+        bytes: 0,
+    });
     json!({
         "ok": true,
         "httpStatus": 200,
-        "grpcStatus": e.code.to_string(),
-        "grpcMessage": e.details,
+        "grpcStatus": code.to_string(),
+        "grpcMessage": details,
         "decoded": "",
         "frames": 0,
         "rawBytes": 0,
-        "durationMs": duration_ms,
+        "durationMs": attempt.elapsed_ms() as u64,
         "reqHeaders": req_headers,
-        "trailers": e.trailers,
-        "statusDetails": super::grpc_status::decode(&e.status_bin, Some(pool)),
+        "trailers": trailers,
+        "statusDetails": super::grpc_status::decode(&status_bin, Some(pool)),
+        "log": log,
     })
 }
 
@@ -760,14 +846,10 @@ fn serving_status(n: u64) -> &'static str {
 /// `grpc.health.v1.Health/Check`. Its two messages are one field each, so they are written
 /// and read by hand rather than through reflection, which a server may not offer.
 async fn health(Json(req): Json<HealthReq>) -> Json<Value> {
+    const PATH: &str = "/grpc.health.v1.Health/Check";
     let target = req.target.unwrap_or_default();
-    if target.trim().is_empty() {
-        return Json(json!({ "ok": false, "error": "target host:port required" }));
-    }
-    let channel = match connect(&target, req.plaintext).await {
-        Ok(c) => c,
-        Err(e) => return Json(json!({ "ok": false, "error": hint(&e) })),
-    };
+    let headers = req.headers.unwrap_or_default();
+    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(5000);
     // HealthCheckRequest { string service = 1; }
     let mut payload = Vec::new();
     if !req.service.is_empty() {
@@ -775,18 +857,24 @@ async fn health(Json(req): Json<HealthReq>) -> Json<Value> {
         prost::encoding::encode_varint(req.service.len() as u64, &mut payload);
         payload.extend_from_slice(req.service.as_bytes());
     }
-    let t0 = Instant::now();
-    let headers = req.headers.unwrap_or_default();
-    let timeout_ms = req.timeout_ms.filter(|&t| t > 0).unwrap_or(5000);
-    let result = unary(
-        channel,
-        "/grpc.health.v1.Health/Check",
-        payload,
-        &headers,
-        timeout_ms,
-    )
-    .await;
-    let duration_ms = t0.elapsed().as_millis() as u64;
+    let url = format!("{}{PATH}", endpoint_uri(&target, req.plaintext).trim_end_matches('/'));
+    let attempt = Attempt::start(
+        "POST (gRPC health)",
+        &url,
+        headers.clone(),
+        json!({ "service": req.service }),
+        payload.len(),
+    );
+    if target.trim().is_empty() {
+        let e = UnaryErr::NotSent("target host:port required".into());
+        return Json(unreachable(&attempt, e, CONNECT_TIMEOUT_MS).await);
+    }
+    let channel = match connect(&target, req.plaintext).await {
+        Ok(c) => c,
+        Err(e) => return Json(unreachable(&attempt, e, CONNECT_TIMEOUT_MS).await),
+    };
+    let result = unary(channel, PATH, payload, &headers, timeout_ms).await;
+    let duration_ms = attempt.elapsed_ms() as u64;
     Json(match result {
         // HealthCheckResponse { ServingStatus status = 1; } — absent means 0, UNKNOWN
         Ok(ok) => {
@@ -794,18 +882,38 @@ async fn health(Json(req): Json<HealthReq>) -> Json<Value> {
                 .get("1")
                 .and_then(Value::as_u64)
                 .unwrap_or(0);
-            json!({ "ok": true, "status": serving_status(status), "durationMs": duration_ms })
+            let log = attempt.succeeded(Reply {
+                status: 200,
+                headers: &ok.headers,
+                trailers: Some(&ok.trailers),
+                body: json!({ "status": serving_status(status) }),
+                bytes: ok.resp.len(),
+            });
+            json!({ "ok": true, "status": serving_status(status), "durationMs": duration_ms, "log": log })
         }
-        Err(e) => json!({
-            "ok": false,
-            "error": match e.code {
-                12 => "the server does not implement the gRPC health service (grpc.health.v1.Health)".to_string(),
-                5 => format!("the server has no health status for this service ({})", e.details),
-                _ => format!("{}: {}", e.code, e.details),
-            },
-            "durationMs": duration_ms,
-        }),
+        // the server answered with an error status: the network worked, so nothing is probed
+        Err(UnaryErr::Status { code, details, .. }) => {
+            let (error, log) = attempt.server_refused("health", vec![health_refusal(code, &details)], "reply");
+            json!({
+                "ok": false,
+                "stage": "health",
+                "error": error["message"],
+                "detail": error,
+                "durationMs": duration_ms,
+                "log": log,
+            })
+        }
+        Err(e) => unreachable(&attempt, e, timeout_ms).await,
     })
+}
+
+/// What a health check's error status means, in words.
+fn health_refusal(code: i32, details: &str) -> String {
+    match code {
+        12 => "the server does not implement the gRPC health service (grpc.health.v1.Health)".to_string(),
+        5 => format!("the server has no health status for this service ({details})"),
+        _ => format!("{code}: {details}"),
+    }
 }
 
 fn encode_request(input: &MessageDescriptor, raw: &str) -> Result<Vec<u8>, String> {
@@ -820,10 +928,51 @@ fn encode_request(input: &MessageDescriptor, raw: &str) -> Result<Vec<u8>, Strin
 }
 
 fn decode_response(output: &MessageDescriptor, bytes: &[u8]) -> Result<String, String> {
-    let msg = DynamicMessage::decode(output.clone(), bytes).map_err(|e| e.to_string())?;
+    let msg = DynamicMessage::decode(output.clone(), bytes).map_err(|e| super::attempt::describe(&e))?;
     let opts = SerializeOptions::new().skip_default_fields(false);
     let mut buf = Vec::new();
     let mut ser = serde_json::Serializer::pretty(&mut buf);
-    msg.serialize_with_options(&mut ser, &opts).map_err(|e| e.to_string())?;
-    String::from_utf8(buf).map_err(|e| e.to_string())
+    msg.serialize_with_options(&mut ser, &opts).map_err(|e| super::attempt::describe(&e))?;
+    String::from_utf8(buf).map_err(|e| super::attempt::describe(&e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn conduits_own_deadline_is_a_timeout_failure() {
+        match UnaryErr::conduit_timeout("answer", 500) {
+            UnaryErr::Failed { chain, timed_out } => {
+                assert!(timed_out);
+                assert!(chain[0].contains("500 ms"), "{chain:?}");
+            }
+            _ => panic!("expected a failure on this side"),
+        }
+    }
+
+    #[test]
+    fn a_server_status_and_a_transport_error_are_told_apart() {
+        assert!(matches!(UnaryErr::from_status(&Status::unimplemented("x")), UnaryErr::Status { code: 12, .. }));
+        let io = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "broken pipe");
+        assert!(matches!(
+            UnaryErr::from_status(&Status::from_error(Box::new(io))),
+            UnaryErr::Failed { timed_out: false, .. }
+        ));
+    }
+
+    #[test]
+    fn health_refusals_read_as_sentences() {
+        assert!(health_refusal(12, "").contains("does not implement"));
+        assert!(health_refusal(5, "svc").contains("(svc)"));
+        assert_eq!(health_refusal(7, "denied"), "7: denied");
+    }
+
+    #[tokio::test]
+    async fn a_bad_target_is_refused_before_sending() {
+        let Json(out) = health(Json(serde_json::from_value(json!({ "target": "bad host:1" })).unwrap())).await;
+        assert_eq!(out["ok"], false);
+        assert_eq!(out["detail"]["kind"], "request");
+        assert!(out["log"].is_object());
+    }
 }
