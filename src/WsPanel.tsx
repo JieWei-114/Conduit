@@ -3,6 +3,10 @@ import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import { ConnPill, Empty, FeedRow, LongField, PanelHead, ReqTabs, Section, usePersist } from './ui';
 import { EXAMPLES } from './examples';
+import { OutcomeView, type Outcome } from './AttemptLog';
+import { downloadJson, isSensitiveHeader, maskUrl } from './share';
+import { maskSecrets } from './vars';
+import type { AttemptLog } from './types';
 
 const LS_TABS = 'conduit.ws.tabs.v1';
 const LS_FORM = 'conduit.ws.form.v1'; // legacy single-form (migrated)
@@ -45,8 +49,58 @@ const DEFAULTS: WsForm = {
 };
 
 interface WTab { id: number; form: WsForm }
-interface Msg { id: number; dir: 'in' | 'out' | 'sys'; at: string; text: string }
-type St = { s: 'idle' | 'connecting' | 'live' | 'error'; msg?: string };
+interface Msg { id: number; dir: 'in' | 'out' | 'sys'; at: string; text: string; channel?: string; meta?: string }
+/** What the server answered instead of a stream (a 401, say), passed on by the proxy. */
+interface Refusal { status: number; body?: string; bodyError?: string | null }
+type St = {
+  s: 'idle' | 'connecting' | 'live' | 'error';
+  /** why it closed, while idle */
+  msg?: string;
+  /** why it failed, while in error */
+  outcome?: Outcome;
+  response?: Refusal;
+  /** the record of the handshake that opened the stream */
+  openLog?: AttemptLog;
+};
+
+const MOD = navigator.platform.includes('Mac') ? '⌘' : 'Ctrl';
+
+/** RFC 6455 close codes, for reading a close at a glance. */
+const CLOSE_CODES: Record<number, string> = {
+  1000: 'normal closure',
+  1001: 'going away',
+  1002: 'protocol error',
+  1003: 'unsupported data',
+  1005: 'no status code',
+  1006: 'abnormal closure',
+  1007: 'invalid payload',
+  1008: 'policy violation',
+  1009: 'message too big',
+  1010: 'missing extension',
+  1011: 'server error',
+  1012: 'service restart',
+  1013: 'try again later',
+  1014: 'bad gateway',
+  1015: 'TLS handshake failed',
+};
+function closeText(code: number, reason?: string): string {
+  const name = CLOSE_CODES[code] ?? (code >= 4000 ? 'application-defined' : '');
+  return `closed ${code}${name ? ` (${name})` : ''}${reason ? ` · ${reason}` : ''}`;
+}
+/** Headers one per line, credential values blanked: the feed can be copied and shared. */
+function headerLines(h?: Record<string, string> | null): string {
+  return Object.entries(h ?? {})
+    .map(([k, v]) => `${k}: ${isSensitiveHeader(k) ? '•••' : v}`)
+    .join('\n');
+}
+/** A failure as connection state: flat text, or the proxy's error envelope / JSON error body. */
+function errorState(j: any, fallback: string): St {
+  return {
+    s: 'error',
+    outcome: { ok: false, text: j?.error || fallback, ms: j?.ms, detail: j?.detail ?? null, log: j?.log ?? null },
+    response: typeof j?.status === 'number' ? { status: j.status, body: j.body, bodyError: j.bodyError } : undefined,
+  };
+}
 
 /* A binary frame arrives base64-encoded with its byte count, because the wire
    is JSON and the bytes are not guaranteed to be valid UTF-8. Label it so the
@@ -55,6 +109,14 @@ function frameText(env: { data?: unknown; encoding?: string; bytes?: number }): 
   const data = String(env.data ?? '');
   return env.encoding === 'base64' ? `[binary ${env.bytes ?? 0} bytes, base64]\n${data}` : data;
 }
+const MODE_DEFAULT: Record<WsForm['mode'], string> = { ws: 'wss://', sio: 'http://', sse: 'https://' };
+
+/** A URL nobody typed: empty, a bare scheme, or one of the examples. */
+function isPlaceholderUrl(url: string): boolean {
+  const u = url.trim();
+  return !u || /^(wss?|https?):\/\/$/i.test(u) || u === EXAMPLES.ws.url || u === EXAMPLES.sse.url;
+}
+
 function loadJson<T>(key: string, fb: T): T {
   try {
     return JSON.parse(localStorage.getItem(key) ?? 'null') ?? fb;
@@ -97,7 +159,7 @@ export default function WsPanel() {
   const [filterMap, setFilterMap] = useState<Record<number, string>>({});
   const [outboxMap, setOutboxMap] = useState<Record<number, string>>({});
   const wsRefs = useRef<Map<number, WebSocket>>(new Map());
-  const esRefs = useRef<Map<number, EventSource>>(new Map());
+  const sseRefs = useRef<Map<number, AbortController>>(new Map());
   const idRef = useRef(0);
 
   const setForm = (u: (f: WsForm) => WsForm) =>
@@ -109,7 +171,7 @@ export default function WsPanel() {
   useEffect(
     () => () => {
       wsRefs.current.forEach((ws) => ws.close());
-      esRefs.current.forEach((es) => es.close());
+      sseRefs.current.forEach((ac) => ac.abort());
     },
     [],
   );
@@ -118,13 +180,30 @@ export default function WsPanel() {
     setMsgsMap((mm) => ({ ...mm, [id]: [{ ...m, id: idRef.current++ }, ...(mm[id] ?? [])].slice(0, 300) }));
   const setSt = (id: number, s: St) => setStateMap((m) => ({ ...m, [id]: s }));
 
-  const headersObj = (f: WsForm) => {
+  /** The header lines as an object, or which lines cannot be one (no `name:` part). */
+  const headersObj = (f: WsForm): { h: Record<string, string>; bad: string[] } => {
     const h: Record<string, string> = {};
-    for (const line of f.headers.split('\n')) {
+    const bad: string[] = [];
+    f.headers.split('\n').forEach((line, n) => {
+      if (!line.trim()) return;
       const i = line.indexOf(':');
-      if (i > 0) h[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-    }
-    return h;
+      if (i > 0 && line.slice(0, i).trim()) h[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+      else bad.push(`line ${n + 1} ("${line.trim().slice(0, 40)}") has no "name:" part`);
+    });
+    return { h, bad };
+  };
+  /** The headers query parameter (the lines were checked by `notReady`). */
+  const headersParam = (f: WsForm): string => btoa(unescape(encodeURIComponent(JSON.stringify(headersObj(f).h))));
+
+  /** Why the form cannot connect yet, or null when it can. */
+  const notReady = (f: WsForm): string | null => {
+    const url = f.url.trim();
+    if (!url || /^(wss?|https?):\/\/$/i.test(url)) return 'Enter a URL first.';
+    if (f.mode === 'sse' && !/^https?:\/\//i.test(url)) return 'The URL must start with http:// or https://.';
+    if (f.mode === 'sio' && !sioTarget(f)) return 'The URL must start with http://, https://, ws:// or wss:// and name a host.';
+    if (f.mode === 'ws' && !/^wss?:\/\//i.test(url)) return 'The URL must start with ws:// or wss://.';
+    const { bad } = headersObj(f);
+    return bad.length ? `Fix the headers: ${bad.join('; ')}.` : null;
   };
 
   /* Socket.IO's own handshake URL. The path falls back only when it is blank
@@ -161,12 +240,12 @@ export default function WsPanel() {
     };
     const engine = raw[0];
     if (engine === '0') {
-      push(id, { dir: 'sys', at: at(), text: '● engine.io open' });
+      push(id, { dir: 'sys', at: at(), text: 'engine.io open' });
       send(`40${nsPrefix(f)}${f.sioAuth.trim()}`);
       return;
     }
     if (engine === '2') return send('3'); // ping → pong
-    if (engine === '1') return push(id, { dir: 'sys', at: at(), text: '● engine.io close' });
+    if (engine === '1') return push(id, { dir: 'sys', at: at(), text: 'engine.io close' });
     if (engine !== '4') return;
 
     const packet = raw.slice(1);
@@ -177,12 +256,12 @@ export default function WsPanel() {
       if (comma >= 0) rest = rest.slice(comma + 1);
     }
     if (type === '0') {
-      setSt(id, { s: 'live' });
-      push(id, { dir: 'sys', at: at(), text: '✔ connected (Socket.IO)' });
+      setStateMap((m) => ({ ...m, [id]: { s: 'live', openLog: m[id]?.openLog } }));
+      push(id, { dir: 'sys', at: at(), text: 'Connected (Socket.IO)' });
     } else if (type === '1') {
-      push(id, { dir: 'sys', at: at(), text: '● disconnected by server' });
+      push(id, { dir: 'sys', at: at(), text: 'Disconnected by the server' });
     } else if (type === '4') {
-      setSt(id, { s: 'error', msg: 'connect_error' });
+      setSt(id, { s: 'error', outcome: { ok: false, text: `The server refused the Socket.IO connection (connect_error)${rest ? `: ${rest}` : ''}` } });
       push(id, { dir: 'in', at: at(), text: `connect_error ${rest}` });
     } else if (type === '2' || type === '3') {
       // EVENT or ACK: drop a leading ack id, keep the JSON array for the feed
@@ -194,48 +273,96 @@ export default function WsPanel() {
   const disconnect = (id: number) => {
     wsRefs.current.get(id)?.close();
     wsRefs.current.delete(id);
-    esRefs.current.get(id)?.close();
-    esRefs.current.delete(id);
+    sseRefs.current.get(id)?.abort();
+    sseRefs.current.delete(id);
     setSt(id, { s: 'idle' });
   };
 
-  const connectSse = (id: number, f: WsForm) => {
-    if (!/^https?:\/\//i.test(f.url.trim())) {
-      setSt(id, { s: 'error', msg: 'URL must start with http:// or https://' });
+  /* SSE goes through fetch, not EventSource: the proxy hands back NDJSON (one line per event,
+     with its name, id and retry), and when the server refuses the stream, a JSON error the
+     browser can read; EventSource would see neither. */
+  const connectSse = async (id: number, f: WsForm) => {
+    const headers = headersParam(f);
+    const q = new URLSearchParams({ target: f.url.trim(), headers });
+    const ac = new AbortController();
+    sseRefs.current.set(id, ac);
+    const mine = () => sseRefs.current.get(id) === ac;
+    const now = () => new Date().toISOString();
+    setSt(id, { s: 'connecting' });
+
+    let r: Response;
+    try {
+      r = await fetch(`/api/sse/proxy?${q}`, { signal: ac.signal });
+    } catch (e) {
+      if (!mine()) return;
+      sseRefs.current.delete(id);
+      setSt(id, errorState(null, `Could not reach conduit's SSE proxy: ${(e as Error).message || e}`));
       return;
     }
-    const q = new URLSearchParams({
-      target: f.url.trim(),
-      headers: btoa(unescape(encodeURIComponent(JSON.stringify(headersObj(f))))),
-    });
-    const es = new EventSource(`/api/sse/proxy?${q}`);
-    setSt(id, { s: 'connecting' });
-    es.onopen = () => { setSt(id, { s: 'live' }); push(id, { dir: 'sys', at: new Date().toISOString(), text: '● connected (SSE)' }); };
-    es.onmessage = (e) => push(id, { dir: 'in', at: new Date().toISOString(), text: e.data });
-    es.onerror = () => {
-      setSt(id, { s: 'error', msg: 'connection failed / closed — check URL, auth header, reachability' });
-      push(id, { dir: 'sys', at: new Date().toISOString(), text: '✗ SSE error / closed' });
-      es.close();
-      esRefs.current.delete(id);
+    if (!r.ok || !(r.headers.get('content-type') ?? '').includes('ndjson')) {
+      const text = await r.text().catch(() => '');
+      if (!mine()) return;
+      sseRefs.current.delete(id);
+      let j: any = null;
+      try {
+        j = JSON.parse(text);
+      } catch {
+        /* not JSON */
+      }
+      setSt(id, errorState(j, `Conduit's SSE proxy answered ${r.status}${text ? `: ${text.slice(0, 200)}` : ''}`));
+      return;
+    }
+
+    const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = '';
+    const handle = (env: any) => {
+      if (env.kind === 'open') {
+        setSt(id, { s: 'live', openLog: env.log });
+        const info = [`HTTP ${env.status}`, env.contentType || 'no content-type', `${env.ms} ms`].join(' · ');
+        push(id, { dir: 'sys', at: now(), text: headerLines(env.headers), channel: `Connected (SSE) · ${info}`, meta: env.warning || undefined });
+      } else if (env.kind === 'event') {
+        const meta = [env.event !== 'message' ? `event: ${env.event}` : '', env.id != null ? `id: ${env.id}` : '', env.retry != null ? `retry: ${env.retry} ms` : '']
+          .filter(Boolean)
+          .join(' · ');
+        push(id, { dir: 'in', at: env.at, text: env.data, channel: `↓ ${env.event}`, meta: meta || undefined });
+      } else if (env.kind === 'close') {
+        setStateMap((m) => ({ ...m, [id]: { s: 'idle', msg: env.reason, openLog: m[id]?.openLog } }));
+        push(id, { dir: 'sys', at: now(), text: env.reason });
+      } else if (env.kind === 'error') {
+        setSt(id, errorState(env, 'The stream failed'));
+      }
     };
-    esRefs.current.set(id, es);
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += value;
+        let nl: number;
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (!line.trim()) continue;
+          try {
+            handle(JSON.parse(line));
+          } catch {
+            push(id, { dir: 'sys', at: now(), text: `Unreadable line from the proxy: ${line.slice(0, 200)}` });
+          }
+        }
+      }
+    } catch (e) {
+      if (mine()) setSt(id, errorState(null, `The stream from conduit broke: ${(e as Error).message || e}`));
+    } finally {
+      if (mine()) sseRefs.current.delete(id);
+    }
   };
 
   const connectWs = (id: number, f: WsForm) => {
     const sio = f.mode === 'sio';
-    const target = sio ? sioTarget(f) : f.url.trim();
-    if (!target || (!sio && !/^wss?:\/\//i.test(target))) {
-      setSt(id, {
-        s: 'error',
-        msg: sio
-          ? 'URL must start with http://, https://, ws:// or wss://'
-          : 'URL must start with ws:// or wss://',
-      });
-      return;
-    }
+    const target = (sio ? sioTarget(f) : f.url.trim()) ?? '';
+    const headers = headersParam(f);
     const q = new URLSearchParams({
       target,
-      headers: btoa(unescape(encodeURIComponent(JSON.stringify(headersObj(f))))),
+      headers,
       ...(f.protocols.trim() ? { protocols: f.protocols.trim() } : {}),
     });
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -247,8 +374,20 @@ export default function WsPanel() {
       if (env.kind === 'open') {
         // For Socket.IO the proxy being open is only the transport; `live`
         // waits for the CONNECT ack in handleSio.
-        push(id, { dir: 'sys', at: new Date().toISOString(), text: sio ? '● proxy connected' : '● connected' });
-        if (!sio) setSt(id, { s: 'live' });
+        const info = [
+          env.status != null ? `HTTP ${env.status}` : '',
+          env.protocol ? `subprotocol ${env.protocol}` : f.protocols.trim() ? 'no subprotocol accepted' : '',
+          env.ms != null ? `${env.ms} ms` : '',
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        push(id, {
+          dir: 'sys',
+          at: new Date().toISOString(),
+          text: headerLines(env.headers),
+          channel: `${sio ? 'Transport connected' : 'Connected'}${info ? ` · ${info}` : ''}`,
+        });
+        setSt(id, { s: sio ? 'connecting' : 'live', openLog: env.log });
       }
       else if (env.kind === 'message') {
         // A binary frame is never engine.io framing — it is a Socket.IO
@@ -259,20 +398,28 @@ export default function WsPanel() {
         else push(id, { dir: 'in', at: env.at, text: frameText(env) });
       }
       else if (env.kind === 'close') {
-        setSt(id, { s: 'idle', msg: `closed ${env.code}` });
-        push(id, { dir: 'sys', at: new Date().toISOString(), text: `● closed ${env.code} ${env.reason ?? ''}` });
+        const text = `${env.by === 'server' ? 'Server ' : ''}${closeText(Number(env.code), env.reason)}`;
+        setStateMap((m) => ({ ...m, [id]: { s: 'idle', msg: text, openLog: m[id]?.openLog } }));
+        push(id, { dir: 'sys', at: new Date().toISOString(), text });
         wsRefs.current.delete(id);
       } else if (env.kind === 'error') {
-        setSt(id, { s: 'error', msg: env.error });
-        push(id, { dir: 'sys', at: new Date().toISOString(), text: `✗ ${env.error}` });
+        setSt(id, errorState(env, 'The connection failed'));
       }
     };
     ws.onerror = () => {
-      setSt(id, { s: 'error', msg: 'connection failed — check URL / auth / reachability' });
+      // the proxy's own error envelope, when there was one, says more than this
+      setStateMap((m) =>
+        m[id]?.s === 'error'
+          ? m
+          : { ...m, [id]: errorState(null, "The connection to conduit's WebSocket proxy failed") },
+      );
       // drop the ref so the next click reconnects instead of toggling to disconnect
       if (wsRefs.current.get(id) === ws) wsRefs.current.delete(id);
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
+      if (wsRefs.current.get(id) === ws && ev.code !== 1000 && ev.code !== 1005) {
+        push(id, { dir: 'sys', at: new Date().toISOString(), text: `Proxy ${closeText(ev.code, ev.reason)}` });
+      }
       if (wsRefs.current.get(id) === ws) {
         wsRefs.current.delete(id);
         setStateMap((m) => ({ ...m, [id]: m[id]?.s === 'error' ? m[id] : { s: 'idle' } }));
@@ -282,9 +429,12 @@ export default function WsPanel() {
   };
 
   const connect = (id: number) => {
-    if (wsRefs.current.get(id) || esRefs.current.get(id)) return disconnect(id);
+    if (wsRefs.current.get(id) || sseRefs.current.get(id)) return disconnect(id);
     const t = tabs.find((x) => x.id === id);
-    if (!t) return;
+    if (!t || notReady(t.form)) return;
+    const prev = msgsMap[id];
+    if (prev?.length && !(prev[0].dir === 'sys' && prev[0].channel === 'Disconnected'))
+      push(id, { dir: 'sys', at: new Date().toISOString(), text: '', channel: 'Disconnected', meta: 'Messages below are from the previous connection.' });
     if (t.form.mode === 'sse') connectSse(id, t.form);
     else connectWs(id, t.form);
   };
@@ -298,25 +448,27 @@ export default function WsPanel() {
     setOutboxMap((m) => ({ ...m, [id]: '' }));
   };
 
-  /* Every refusal names its reason. An Emit that quietly does nothing is
-     indistinguishable from a broken button. */
-  const emitEvent = (id: number) => {
-    const f = tabs.find((t) => t.id === id)?.form;
-    if (!f) return;
-    const ws = wsRefs.current.get(id);
-    if (ws?.readyState !== WebSocket.OPEN) return flashEmit('Connect first');
-    const name = f.sioEvent.trim();
-    if (!name) return flashEmit('Enter an event name first');
-    let arg: unknown = {};
+  /** Why an event cannot be sent yet, or null when it can: shown next to the disabled button. */
+  const emitBlock = (f: WsForm, isLive: boolean): string | null => {
+    if (!isLive) return 'Connect first.';
+    if (!f.sioEvent.trim()) return 'Enter an event name first.';
     const raw = f.sioPayload.trim();
     if (raw) {
       try {
-        arg = JSON.parse(raw);
+        JSON.parse(raw);
       } catch {
-        return flashEmit('Payload is not valid JSON');
+        return 'The payload is not valid JSON.';
       }
     }
-    const body = JSON.stringify([name, arg]);
+    return null;
+  };
+
+  const emitEvent = (id: number) => {
+    const f = tabs.find((t) => t.id === id)?.form;
+    const ws = wsRefs.current.get(id);
+    if (!f || ws?.readyState !== WebSocket.OPEN || emitBlock(f, stateMap[id]?.s === 'live')) return;
+    const raw = f.sioPayload.trim();
+    const body = JSON.stringify([f.sioEvent.trim(), raw ? JSON.parse(raw) : {}]);
     ws.send(`42${nsPrefix(f)}${body}`);
     push(id, { dir: 'out', at: new Date().toISOString(), text: body });
   };
@@ -327,9 +479,6 @@ export default function WsPanel() {
   };
 
   const [flashMsg, flash] = useFlash();
-  // The Emit button sits in the right column; its refusals belong there,
-  // not under the saved-connection row on the left.
-  const [emitMsg, flashEmit] = useFlash();
 
 
   // ── tabs ─────────────────────────────────────────────────────────────────
@@ -339,7 +488,23 @@ export default function WsPanel() {
   };
   const addTab = () => {
     const id = Math.max(0, ...tabs.map((t) => t.id)) + 1;
-    setTabs((ts) => [...ts, { id, form: hydrate({}) }]);
+    const f = active.form;
+    setTabs((ts) => [
+      ...ts,
+      {
+        id,
+        form: hydrate({
+          mode: f.mode,
+          url: f.url,
+          headers: f.headers,
+          protocols: f.protocols,
+          sioPath: f.sioPath,
+          sioNamespace: f.sioNamespace,
+          sioQuery: f.sioQuery,
+          sioAuth: f.sioAuth,
+        }),
+      },
+    ]);
     setActiveId(id);
   };
   const closeTab = (id: number) => {
@@ -364,7 +529,9 @@ export default function WsPanel() {
   const msgs = msgsMap[active.id] ?? [];
   const filter = filterMap[active.id] ?? '';
   const fq = filter.trim().toLowerCase();
-  const shown = fq ? msgs.filter((m) => m.text.toLowerCase().includes(fq)) : msgs;
+  const shown = fq
+    ? msgs.filter((m) => `${m.channel ?? ''} ${m.meta ?? ''} ${m.text}`.toLowerCase().includes(fq))
+    : msgs;
 
   // one wording for connection state across every streaming panel
   const connText =
@@ -373,18 +540,24 @@ export default function WsPanel() {
       : connState === 'connecting'
         ? 'Connecting…'
         : connState === 'error'
-          ? `Error — ${st.msg}`
-          : `Disconnected${st.msg ? ` · ${st.msg}` : ''}`;
-  const connCls = connState === 'live' ? 'status ok' : connState === 'error' ? 'status bad' : 'status';
+          ? 'Error'
+          : 'Disconnected';
+  const blocked = notReady(form);
+  const emitWhy = sio ? emitBlock(form, live) : null;
+  const outbox = outboxMap[active.id] ?? '';
+  // the values of credential headers: masked wherever a log or a copy leaves the app
+  const secrets = Object.entries(headersObj(form).h)
+    .filter(([k, v]) => isSensitiveHeader(k) && v)
+    .map(([, v]) => v);
 
   const switchMode = (mode: WsForm['mode']) => {
     if (!editable) disconnect(active.id);
-    set('mode', mode);
+    setForm((f) => ({ ...f, mode, url: f.mode !== mode && isPlaceholderUrl(f.url) ? MODE_DEFAULT[mode] : f.url }));
   };
 
-  const loadExample = (ex: typeof EXAMPLES.ws) => {
+  const loadExample = (mode: 'ws' | 'sse') => {
     if (!editable) disconnect(active.id);
-    setForm((f) => ({ ...f, mode: 'ws', url: ex.url }));
+    setForm((f) => ({ ...f, mode, url: mode === 'sse' ? EXAMPLES.sse.url : EXAMPLES.ws.url }));
   };
 
   const pillState = connState === 'live' ? 'live' : connState === 'connecting' ? 'connecting' : connState === 'error' ? 'error' : 'idle';
@@ -404,6 +577,7 @@ export default function WsPanel() {
         onSelect={setActiveId}
         onClose={closeTab}
         onAdd={addTab}
+        addTitle="New tab with the same connection"
       />
 
       <div className="layout">
@@ -472,10 +646,7 @@ export default function WsPanel() {
           </div>
           {flashMsg && <div className="toast">{flashMsg}</div>}
 
-          <Section
-            title="Connection"
-            actions={<ConnPill state={pillState} text={connState === 'error' ? 'Error' : connText} />}
-          >
+          <Section title="Connection" actions={<ConnPill state={pillState} text={connText} />}>
             <div className="row row-tight">
               <LongField
                 url
@@ -488,21 +659,48 @@ export default function WsPanel() {
                 onChange={(v) => set('url', v)}
                 onEnter={() => connect(active.id)}
               />
-              <button
-                className={live || connState === 'connecting' ? 'btn-secondary btn-on' : 'btn-primary'}
-                onClick={() => connect(active.id)}
-              >
-                {live || connState === 'connecting' ? 'Disconnect' : 'Connect'}
-              </button>
+              {live ? (
+                <button className="btn-secondary btn-on" onClick={() => disconnect(active.id)}>
+                  Disconnect
+                </button>
+              ) : connState === 'connecting' ? (
+                <>
+                  <button className="btn-primary" disabled>
+                    Connecting…
+                  </button>
+                  <button className="btn-ghost" title="Stop waiting for the server" onClick={() => disconnect(active.id)}>
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button className="btn-primary" disabled={!!blocked} title={blocked ?? undefined} onClick={() => connect(active.id)}>
+                  Connect
+                </button>
+              )}
             </div>
             <div className="hint">
-              {sse
-                ? 'An http:// or https:// endpoint that streams text/event-stream.'
-                : sio
-                  ? 'The server root, e.g. http://localhost:3000. The handshake path below is added for you.'
-                  : 'A ws:// or wss:// URL. Fields lock while connected.'}
+              {blocked && editable
+                ? blocked
+                : sse
+                  ? 'An http:// or https:// endpoint that streams text/event-stream. Enter connects.'
+                  : sio
+                    ? 'The server root, e.g. http://localhost:3000. The handshake path below is added for you.'
+                    : 'A ws:// or wss:// URL. Enter connects; fields lock while connected.'}
             </div>
-            {connState === 'error' && st.msg && <div className="error">{st.msg}</div>}
+            {connState === 'idle' && st.msg && <div className="hint">Last connection: {st.msg}</div>}
+            {connState === 'error' && <OutcomeView o={st.outcome} secrets={secrets} />}
+            {connState === 'error' && st.response?.body && (
+              <>
+                <div className="block-label">Body of the {st.response.status} answer</div>
+                <pre className="feed-msg">{st.response.body}</pre>
+              </>
+            )}
+            {connState === 'error' && st.response?.bodyError && (
+              <div className="hint">The body of the answer could not be read: {st.response.bodyError}</div>
+            )}
+            {connState === 'live' && st.openLog && (
+              <OutcomeView o={{ ok: true, text: 'Connected', ms: st.openLog.durationMs, log: st.openLog }} secrets={secrets} />
+            )}
 
             {sio && (
               <>
@@ -552,11 +750,11 @@ export default function WsPanel() {
         <div className="right">
           {sse ? (
             <div className="hint m-0 mb-3">
-              SSE is receive-only: connect on the left and events stream below. Only default (unnamed) <code>message</code>{' '}
-              events are shown.
+              SSE is receive-only: connect on the left and events stream below, named events included, each with its{' '}
+              <code>event</code>, <code>id</code> and <code>retry</code>.
             </div>
           ) : sio ? (
-            <Section flush title="Emit an event">
+            <Section flush title="Send an event">
               <div className="row">
                 <input
                   className="w-lg"
@@ -584,20 +782,23 @@ export default function WsPanel() {
                 }}
               />
               <div className="inline mt-2">
-                <button className="btn-primary" onClick={() => emitEvent(active.id)}>
-                  Emit
+                <button className="btn-primary" disabled={!!emitWhy} onClick={() => emitEvent(active.id)}>
+                  Send
                 </button>
                 <span className="hint m-0">
-                  JSON payload. <kbd>⌘↵</kbd> emits.
+                  {emitWhy ?? (
+                    <>
+                      JSON payload. <kbd>{MOD}↵</kbd> sends.
+                    </>
+                  )}
                 </span>
-                {emitMsg && <span className="toast m-0">{emitMsg}</span>}
               </div>
             </Section>
           ) : (
             <Section flush title="Send a message">
               <textarea
                 rows={4}
-                value={outboxMap[active.id] ?? ''}
+                value={outbox}
                 spellCheck={false}
                 aria-label="Message"
                 placeholder={live ? '{"type":"subscribe"}' : 'Connect first'}
@@ -608,25 +809,56 @@ export default function WsPanel() {
                 }}
               />
               <div className="inline mt-2">
-                <button className="btn-primary" disabled={!live} onClick={() => sendMsg(active.id)}>
+                <button className="btn-primary" disabled={!live || !outbox.trim()} onClick={() => sendMsg(active.id)}>
                   Send
                 </button>
                 <span className="hint m-0">
-                  <kbd>⌘↵</kbd> sends.
+                  {!live ? (
+                    'Connect first.'
+                  ) : !outbox.trim() ? (
+                    'Type a message first.'
+                  ) : (
+                    <>
+                      <kbd>{MOD}↵</kbd> sends.
+                    </>
+                  )}
                 </span>
               </div>
             </Section>
           )}
 
-          <Section
-            title={
-              <>
-                Messages{' '}
-                {msgs.length > 0 && <span className="count">({fq ? `${shown.length}/${msgs.length}` : msgs.length})</span>}
-              </>
-            }
-            actions={
-              msgs.length > 0 && (
+          <Section title="Messages">
+            {msgs.length > 0 && (
+              <div className="feed-head mt-0">
+                <span className="count">{fq ? `${shown.length} / ${msgs.length}` : msgs.length} messages</span>
+                <input
+                  className="grow"
+                  placeholder="Filter messages"
+                  aria-label="Filter messages"
+                  value={filter}
+                  spellCheck={false}
+                  onChange={(e) => setFilterMap((m) => ({ ...m, [active.id]: e.target.value }))}
+                />
+                <button
+                  className="btn-ghost btn-sm"
+                  title="Save every message in this feed, oldest first, as a JSON file"
+                  onClick={() =>
+                    downloadJson(form.mode, 'feed', {
+                      url: maskUrl(form.url),
+                      mode: form.mode,
+                      exportedAt: new Date().toISOString(),
+                      messages: [...msgs].reverse().map(({ dir, at, channel, meta, text }) => ({
+                        dir,
+                        at,
+                        channel,
+                        meta: meta && maskSecrets(meta, secrets),
+                        text: maskSecrets(text, secrets),
+                      })),
+                    })
+                  }
+                >
+                  Export JSON
+                </button>
                 <button
                   className="btn-ghost btn-sm"
                   title="Discard the messages received so far"
@@ -634,44 +866,43 @@ export default function WsPanel() {
                 >
                   Clear
                 </button>
-              )
-            }
-          >
-            {msgs.length > 0 && (
-              <input
-                placeholder="Filter messages"
-                aria-label="Filter messages"
-                value={filter}
-                spellCheck={false}
-                onChange={(e) => setFilterMap((m) => ({ ...m, [active.id]: e.target.value }))}
-              />
+              </div>
             )}
             {msgs.length === 0 && connState !== 'live' && (
               <Empty
                 icon="⇅"
-                title="Not connected"
+                title="No messages yet"
                 hint={
-                  <>
-                    Enter a URL on the left and press <kbd>Connect</kbd>. To try it, <code>wss://echo.websocket.org</code>{' '}
-                    sends back whatever you send.
-                  </>
+                  sse ? (
+                    <>
+                      Enter a URL on the left and press <kbd>Connect</kbd>. To try it, <code>{EXAMPLES.sse.url}</code> streams
+                      Wikipedia edits as they happen.
+                    </>
+                  ) : (
+                    <>
+                      Enter a URL on the left and press <kbd>Connect</kbd>. To try it, <code>wss://echo.websocket.org</code>{' '}
+                      sends back whatever you send.
+                    </>
+                  )
                 }
               >
-                <button className="btn-secondary btn-sm" onClick={() => loadExample(EXAMPLES.ws)}>
-                  Use the echo server
+                <button className="btn-secondary btn-sm" onClick={() => loadExample(sse ? 'sse' : 'ws')}>
+                  {sse ? 'Use the Wikimedia stream' : 'Use the echo server'}
                 </button>
               </Empty>
             )}
             {msgs.length === 0 && connState === 'live' && (
               <Empty
                 icon="⇅"
-                title="Connected, no messages yet"
+                title="No messages yet"
                 hint={
-                  sse
-                    ? 'Events pushed by the server will appear here.'
-                    : sio
-                      ? 'Events from the server appear here. Emit one above to check the round trip.'
-                      : 'Incoming frames appear here. Send a message above to check the round trip.'
+                  sse ? (
+                    'Connected. Events pushed by the server will appear here.'
+                  ) : (
+                    <>
+                      Connected. Messages from the server appear here; press <kbd>Send</kbd> above to check the round trip.
+                    </>
+                  )
                 }
               />
             )}
@@ -681,10 +912,12 @@ export default function WsPanel() {
                   <FeedRow
                     key={m.id}
                     tone={`ws-${m.dir}`}
-                    channel={m.dir === 'in' ? '↓ received' : m.dir === 'out' ? '↑ sent' : 'event'}
+                    channel={m.channel ?? (m.dir === 'in' ? '↓ received' : m.dir === 'out' ? '↑ sent' : 'event')}
                     at={m.at}
                     text={m.text}
+                    meta={m.meta}
                     pretty={m.dir !== 'sys'}
+                    copy
                   />
                 ))}
               </div>

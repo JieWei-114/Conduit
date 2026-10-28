@@ -35,6 +35,7 @@ export async function callConnect(opts: {
   body: string;
   headers: Record<string, string>;
   timeoutMs: number;
+  signal?: AbortSignal;
 }): Promise<CallResult> {
   // Connect's own headers replace any the caller typed in another case (`Content-Type`)
   const own = new Set(['content-type', 'connect-protocol-version']);
@@ -45,6 +46,7 @@ export async function callConnect(opts: {
   };
   const r = await fetch('/api/http/send', {
     method: 'POST',
+    signal: opts.signal,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
       url: joinUrl(opts.base, opts.service, opts.method),
@@ -54,13 +56,25 @@ export async function callConnect(opts: {
       body: opts.body.trim() || '{}',
       timeoutMs: opts.timeoutMs,
     }),
-  }).then((x) => x.json());
+  }).then(async (x) => {
+    const raw = await x.text();
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return { ok: false, error: `Conduit's server answered HTTP ${x.status} with a body that is not JSON` };
+    }
+  });
   if (!r.ok)
     return {
       ok: false,
-      stage: 'network',
-      error: `${r.error ?? 'request failed'} — is the server reachable, and does it speak Connect (HTTP/1.1 or HTTP/2 with JSON)?`,
+      stage: r.stage === 'timeout' ? 'timeout' : 'network',
+      // the detail explains a failure the server recorded; a bare error gets the likely causes
+      error: r.detail
+        ? (r.error ?? 'request failed')
+        : `${r.error ?? 'request failed'}. Is the server reachable, and does it speak Connect (HTTP/1.1 or HTTP/2 with JSON)?`,
       durationMs: r.durationMs,
+      detail: r.detail,
+      log: r.log,
     };
   const text: string = r.bodyText ?? '';
   const common = {
@@ -71,6 +85,7 @@ export async function callConnect(opts: {
     durationMs: r.durationMs ?? 0,
     reqHeaders: headers,
     headers: r.headers,
+    log: r.log,
   };
   if (r.status === 200) return { ...common, grpcStatus: '0', grpcMessage: '', decoded: pretty(text) };
   // an error body is {code, message, details: [{type, value, debug?}]}

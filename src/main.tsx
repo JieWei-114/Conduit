@@ -5,12 +5,7 @@ import { reportSaved, reportSaveFailed } from './storeStatus';
 import { flushPending, isDiscarded, onDiscard } from './ui';
 import './style.css';
 
-/**
- * Persist all UI settings to a server-side file (conduit-data.json) so they
- * survive a browser cache clear. On boot we hydrate localStorage from the file,
- * then mirror every localStorage write back to the file (debounced). All panels
- * keep using localStorage as-is — this just gives it a durable, deletable home.
- */
+/** localStorage is hydrated from the server's store on boot and mirrored back to it on every write. */
 async function boot() {
   try {
     const blob = await fetch('/api/store').then((r) => r.json());
@@ -18,15 +13,10 @@ async function boot() {
       for (const [k, v] of Object.entries(blob))
         if (typeof v === 'string') localStorage.setItem(k, v);
   } catch {
-    /* first run / server store unavailable — fall back to plain localStorage */
+    /* no server store yet: plain localStorage */
   }
 
-  /* The theme has to be applied here rather than only from the inline script in
-     index.html: that script runs before this hydration, so it can only see what
-     the browser happens to hold. This is the first point where the server store
-     has been merged in and the saved value is authoritative. Both exist on
-     purpose — the inline script avoids a flash of the wrong scheme on a warm
-     load, this settles the correct one. */
+  // index.html applies the cached theme early; the stored one only settles here, after hydration
   const savedTheme = localStorage.getItem('conduit.theme.v1');
   if (savedTheme === 'light' || savedTheme === 'dark')
     document.documentElement.setAttribute('data-theme', savedTheme);
@@ -118,10 +108,26 @@ async function boot() {
   };
 
   (window as unknown as { __conduitFlush: (id?: number) => Promise<void> }).__conduitFlush = saveNow;
-  window.addEventListener('pagehide', () => void saveNow());
+  // a beacon is still delivered after the page is gone, which a fetch is not guaranteed to be
+  const beacon = () => {
+    if (isDiscarded() || typeof navigator.sendBeacon !== 'function') return;
+    flushPending();
+    const body = snapshot();
+    if (body === lastSaved) return;
+    try {
+      navigator.sendBeacon('/api/store', new Blob([body], { type: 'application/json' }));
+    } catch {
+      /* the PUT below still runs */
+    }
+  };
+  const leaving = () => {
+    beacon();
+    void saveNow();
+  };
+  window.addEventListener('pagehide', leaving);
   window.addEventListener('beforeunload', () => void saveNow());
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') void saveNow();
+    if (document.visibilityState === 'hidden') leaving();
   });
 
   createRoot(document.getElementById('root')!).render(

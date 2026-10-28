@@ -3,6 +3,8 @@ import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
 import JsonTree from './JsonTree';
+import { AttemptLogBar, CopyButton, OutcomeView, shareableLog } from './AttemptLog';
+import type { AttemptError, AttemptLog } from './types';
 import { rowKeyDown, rowTabIndex } from './rowNav';
 import { RequestVarsBox } from './RequestVarsBox';
 import { withoutSecretValues } from './VarList';
@@ -19,6 +21,10 @@ import {
   type RequestVars,
 } from './vars';
 import { appendQuery } from './url';
+
+/** The key that sends from a multi-line field, as this OS spells it. */
+const SEND_KEY = typeof navigator !== 'undefined' && navigator.platform.includes('Mac') ? '⌘↵' : 'Ctrl↵';
+import { fmtBytes, isSensitiveHeader, maskDeep, maskHeaderValue, maskUrl, shellQuote } from './share';
 
 const LS_FORM = 'conduit.http.form.v2';
 const LS_TABS = 'conduit.http.tabs.v1';
@@ -68,6 +74,11 @@ interface HttpResult {
   binary?: boolean;
   contentType?: string;
   bodyBase64?: string;
+  /** why, when the request was sent and failed on the way */
+  detail?: AttemptError;
+  log?: AttemptLog;
+  /** the secret values this request was sent with, masked out of a copied log */
+  secrets?: string[];
 }
 
 interface HttpHist {
@@ -76,7 +87,8 @@ interface HttpHist {
   ok: boolean;
   status?: number;
   durationMs?: number;
-  snapshot?: { text: string; truncated: boolean };
+  /** the body, or the error; a failure also keeps why and its record, masked */
+  snapshot?: { text: string; truncated: boolean; detail?: AttemptError; log?: AttemptLog };
 }
 
 const DEFAULTS: HttpForm = {
@@ -128,6 +140,10 @@ function hydrate(saved: Partial<HttpForm>): HttpForm {
 /** `form` as kept without the user saving it: no auth, no secret variable values. */
 function unsaved(form: HttpForm): HttpForm {
   return { ...form, auth: AUTH_DEFAULTS, vars: { ...form.vars, vars: withoutSecretValues(form.vars.vars) } };
+}
+
+function hasAuth(a: AuthState): boolean {
+  return !!(authHeader(a) || (a.type === 'oauth2' && (a.oauthClientId || a.oauthClientSecret)));
 }
 
 /** Whether `f` sends a body at all. */
@@ -193,6 +209,13 @@ function headersOf(f: HttpForm): Record<string, string> {
   return out;
 }
 
+function maskedBody(body: string): string {
+  const parsed = tryParse(body);
+  if (parsed === undefined) return body;
+  const masked = maskDeep(parsed, [], true);
+  return JSON.stringify(masked) === JSON.stringify(parsed) ? body : JSON.stringify(masked, null, 2);
+}
+
 /** The URL of `f` with its query parameters appended. */
 function urlOf(f: HttpForm): string {
   const active = f.query.filter((q) => q.key);
@@ -248,6 +271,7 @@ function parseCurl(text: string): Partial<HttpForm> | { error: string } | null {
   for (let i = 1; i < toks.length; i++) {
     const a = toks[i];
     if (a === '-X' || a === '--request') method = toks[++i]?.toUpperCase() ?? '';
+    else if (a === '-I' || a === '--head') method = 'HEAD';
     else if (a === '-H' || a === '--header') {
       const line = toks[++i] ?? '';
       const idx = line.indexOf(':');
@@ -338,12 +362,11 @@ const ResponseBody = memo(function ResponseBody({
   parsed: unknown;
   view: string;
 }) {
-  if (!result.ok) return <pre>{result.error}</pre>;
   if (result.binary)
     return (
       <div>
         <div className="hint mb-2">
-          Binary response ({result.contentType || 'unknown type'}, {result.size} B), not shown as text.
+          Binary response ({result.contentType || 'unknown type'}, {fmtBytes(result.size ?? 0)}), not shown as text.
         </div>
         <button
           className="btn-secondary"
@@ -358,7 +381,8 @@ const ResponseBody = memo(function ResponseBody({
               'response' +
               (result.contentType?.includes('image/png') ? '.png' : result.contentType?.includes('pdf') ? '.pdf' : '.bin');
             a.click();
-            URL.revokeObjectURL(url);
+            // revoking at once can cancel the download in an embedded webview
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
           }}
         >
           Download
@@ -369,12 +393,6 @@ const ResponseBody = memo(function ResponseBody({
   if (parsed !== undefined && view === 'pretty') return <pre>{JSON.stringify(parsed, null, 2)}</pre>;
   return <pre>{result.bodyText || '(empty body)'}</pre>;
 });
-
-function fmtBytes(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1048576).toFixed(1)} MB`;
-}
 
 export default function HttpPanel() {
   const init = useRef<{ tabs: HttpTab[]; activeId: number } | null>(null);
@@ -397,11 +415,13 @@ export default function HttpPanel() {
   const busy = !!busyMap[activeId];
   const setResult = (r: HttpResult | null) => setResultsMap((m) => ({ ...m, [activeId]: r }));
   const [showHeaders, setShowHeaders] = useState(false);
+  const [logOpen, setLogOpen] = useState(false);
   const [respView, setRespView] = useState<'pretty' | 'tree' | 'raw'>('tree');
   const [hist, setHist] = useState<HttpHist[]>(() => loadJson(LS_HISTORY, []));
   const [tab, setTab] = useState<'response' | 'history'>('response');
 
   const set = <K extends keyof HttpForm>(k: K, v: HttpForm[K]) => setForm((f) => ({ ...f, [k]: v }));
+  const aborts = useRef<Record<number, AbortController>>({});
 
   const persisted = useMemo(() => ({ tabs, activeId }), [tabs, activeId]);
   usePersist(LS_TABS, persisted, () =>
@@ -415,7 +435,8 @@ export default function HttpPanel() {
   };
   const addTab = () => {
     const id = Math.max(0, ...tabs.map((t) => t.id)) + 1;
-    setTabs((ts) => [...ts, { id, form: hydrate({}) }]);
+    const origin = form.url.trim().match(/^[a-z][a-z0-9+.-]*:\/\/[^/?#\s]+/i)?.[0];
+    setTabs((ts) => [...ts, { id, form: hydrate({ url: origin ? `${origin}/` : '', timeoutMs: form.timeoutMs }) }]);
     setActiveId(id);
   };
   const closeTab = (id: number) => {
@@ -459,9 +480,12 @@ export default function HttpPanel() {
     if (out.bodyKind === 'json' && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-type'))
       headers['content-type'] = 'application/json';
     let res: HttpResult;
+    const ctl = new AbortController();
+    aborts.current[tid] = ctl;
     try {
       res = await fetch('/api/http/send', {
         method: 'POST',
+        signal: ctl.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           url: urlOf(out),
@@ -473,10 +497,29 @@ export default function HttpPanel() {
           files: out.files.filter((f) => f.field && f.name),
           timeoutMs: Number(out.timeoutMs) || 15000,
         }),
-      }).then((r) => r.json());
+      }).then(async (r) => {
+        // Conduit's own server answers JSON; anything else (a crash page, a proxy) is named, not parsed
+        const raw = await r.text();
+        try {
+          return JSON.parse(raw) as HttpResult;
+        } catch {
+          const head = raw.trim().slice(0, 300);
+          return {
+            ok: false,
+            error: `Conduit's server answered HTTP ${r.status}${r.statusText ? ` ${r.statusText}` : ''} with a body that is not JSON${head ? `:\n${head}` : ' (empty)'}`,
+          };
+        }
+      });
     } catch (e) {
       res = { ok: false, error: String(e) };
     }
+    delete aborts.current[tid];
+    if (ctl.signal.aborted) {
+      setResultsMap((m) => ({ ...m, [tid]: { ok: false, error: 'Cancelled: the response was not waited for.' } }));
+      setBusyMap((m) => ({ ...m, [tid]: false }));
+      return;
+    }
+    res.secrets = secrets;
     setResultsMap((m) => ({ ...m, [tid]: res }));
     if (res.ok && sentForm.vars.extract.some((x) => x.name.trim() && x.path.trim())) {
       // only a successful answer is read: an error body must not overwrite a good value
@@ -490,6 +533,13 @@ export default function HttpPanel() {
     }
     // a server may echo what it was sent: the kept snapshot never carries a secret value
     const text = maskSecrets(res.ok ? (res.bodyText ?? '') : (res.error ?? ''), secrets);
+    // a failure keeps why it failed and its record, so a restored entry reads as it did
+    const failure = res.ok
+      ? {}
+      : {
+          detail: res.detail ? (maskDeep(res.detail, secrets) as AttemptError) : undefined,
+          log: res.log ? shareableLog(res.log, secrets) : undefined,
+        };
     setHist((h) => {
       const next: HttpHist[] = [
         {
@@ -500,7 +550,7 @@ export default function HttpPanel() {
           ok: res.ok && (res.status ?? 0) < 400,
           status: res.status,
           durationMs: res.durationMs,
-          snapshot: { text: text.slice(0, SNAP_MAX), truncated: text.length > SNAP_MAX },
+          snapshot: { text: text.slice(0, SNAP_MAX), truncated: text.length > SNAP_MAX, ...failure },
         },
         ...h,
       ].slice(0, HISTORY_MAX);
@@ -515,7 +565,6 @@ export default function HttpPanel() {
     localStorage.setItem(LS_SAVED, JSON.stringify(next));
   };
   const [flashMsg, flash] = useFlash();
-
 
   /**
    * A cURL command is multi-line and long, so it is pasted into a field rather
@@ -536,34 +585,38 @@ export default function HttpPanel() {
     setCurlOpen(false);
     flash('Request filled from cURL');
   };
-  const exportCurl = () => {
-    const lines = [`curl -X ${form.method} '${fullUrl}'`];
-    for (const [k, v] of Object.entries(parseHeaders()))
-      lines.push(`  -H '${k}: ${v.replace(/'/g, "'\\''")}'`);
+  const curlOf = (reveal = false) => {
+    const val = (k: string, v: string) => (reveal ? v : maskHeaderValue(k, v));
+    const url = reveal ? fullUrl : maskUrl(fullUrl);
+    // HEAD is `-I`: `-X HEAD` makes curl wait for a body that never comes
+    const lines = [`curl ${form.method === 'HEAD' ? '-I' : `-X ${form.method}`} ${shellQuote(url)}`];
+    for (const [k, v] of Object.entries(parseHeaders())) lines.push(`  -H ${shellQuote(`${k}: ${val(k, v)}`)}`);
     if (!['GET', 'HEAD'].includes(form.method) && form.bodyKind !== 'none') {
+      const fields = form.form.filter((f) => f.key);
       if (form.bodyKind === 'form')
-        lines.push(`  --data '${form.form.filter((f) => f.key).map((f) => `${f.key}=${f.value}`).join('&')}'`);
-      else if (form.bodyKind === 'multipart')
-        form.form.filter((f) => f.key).forEach((f) => lines.push(`  -F '${f.key}=${f.value}'`));
-      else if (form.body) lines.push(`  --data-raw '${form.body.replace(/'/g, "'\\''")}'`);
+        fields.forEach((f) => lines.push(`  --data-urlencode ${shellQuote(`${f.key}=${val(f.key, f.value)}`)}`));
+      else if (form.bodyKind === 'multipart') {
+        // --form-string: a value starting with @ or < is text, not a file to upload
+        fields.forEach((f) => lines.push(`  --form-string ${shellQuote(`${f.key}=${val(f.key, f.value)}`)}`));
+        form.files
+          .filter((f) => f.field && f.name)
+          .forEach((f) => lines.push(`  -F ${shellQuote(`${f.field}=@${f.name}`)}`));
+      } else if (form.body) lines.push(`  --data-raw ${shellQuote(reveal ? form.body : maskedBody(form.body))}`);
     }
-    navigator.clipboard.writeText(lines.join(' \\\n')).then(
-      () => flash(form.vars && usesVars(Object.values(templatesOf(form)), form.vars)
-        ? 'Copied as cURL — {{variables}} are left as written'
-        : 'Copied as cURL'),
-      () => flash('Copy failed — the clipboard is not available'),
-    );
+    return lines.join(' \\\n');
   };
 
   const restore = (h: HttpHist) => {
     setForm(hydrate(h.form));
-    if (h.snapshot)
-      setResult({
-        ok: (h.status ?? 0) < 400,
-        status: h.status,
-        bodyText: h.snapshot.text + (h.snapshot.truncated ? '\n… (truncated in history)' : ''),
-        durationMs: h.durationMs,
-      });
+    if (h.snapshot) {
+      const text = h.snapshot.text + (h.snapshot.truncated ? '\n… (truncated in history)' : '');
+      // no status means no answer came back: the snapshot is the error, not a body
+      setResult(
+        h.status == null
+          ? { ok: false, error: text, durationMs: h.durationMs, detail: h.snapshot.detail, log: h.snapshot.log }
+          : { ok: true, status: h.status, bodyText: text, durationMs: h.durationMs },
+      );
+    }
     setTab('response');
   };
 
@@ -607,7 +660,7 @@ export default function HttpPanel() {
         onSelect={setActiveId}
         onClose={closeTab}
         onAdd={addTab}
-        addTitle="New request tab"
+        addTitle="New tab with the same connection"
       />
 
       <div className="layout">
@@ -624,9 +677,16 @@ export default function HttpPanel() {
                 >
                   Import cURL
                 </button>
-                <button className="btn-ghost btn-sm" title="Copy this request as a cURL command" onClick={exportCurl}>
-                  Copy as cURL
-                </button>
+                <CopyButton
+                  text={() => curlOf()}
+                  label="Copy as cURL"
+                  title="Copy this request as a cURL command, with credential headers, query values and passwords masked. {{variables}} are left as written."
+                />
+                <CopyButton
+                  text={() => curlOf(true)}
+                  label="Copy with secrets"
+                  title="Copy this request as a cURL command exactly as it would be sent, credentials included"
+                />
               </>
             }
           />
@@ -676,6 +736,7 @@ export default function HttpPanel() {
               <textarea
                 rows={4}
                 spellCheck={false}
+                aria-label="cURL command"
                 autoFocus
                 placeholder="curl 'https://api.example.com/v1/things' -H 'authorization: Bearer …'"
                 value={curlText}
@@ -697,7 +758,7 @@ export default function HttpPanel() {
                 >
                   Cancel
                 </button>
-                <span className="hint m-0">Paste the whole command. <kbd>⌘↵</kbd> fills.</span>
+                <span className="hint m-0">Paste the whole command. <kbd>{SEND_KEY}</kbd> fills.</span>
               </div>
             </div>
           )}
@@ -719,9 +780,6 @@ export default function HttpPanel() {
                 onChange={(v) => set('url', v)}
                 onEnter={() => send()}
               />
-              <button className="btn-primary" disabled={busy || !form.url.trim()} onClick={send} title="Send (Enter in the URL, or ⌘↵ in the body)">
-                {busy ? 'Sending…' : 'Send'}
-              </button>
             </div>
             {activeQuery > 0 ? (
               <div className="hint break">Sends to {fullUrl}</div>
@@ -751,7 +809,15 @@ export default function HttpPanel() {
             onMessage={flash}
           />
 
-          <AuthBox value={form.auth} onChange={(a) => set('auth', a)} />
+          <AuthBox
+            value={form.auth}
+            onChange={(a) => set('auth', a)}
+            note={
+              hasAuth(form.auth) && !saved.some((x) => x.name === pickedSaved)
+                ? 'Auth is not kept in the draft after a reload; save the request to keep it.'
+                : undefined
+            }
+          />
 
           <Section
             title="Body"
@@ -862,21 +928,36 @@ export default function HttpPanel() {
             />
           </Section>
 
-          <Section title="Options">
-            <div className="row">
-              <label className="check" htmlFor="http-timeout">
-                Timeout
-              </label>
+          <div className="action-bar">
+            {busy ? (
+              <button className="btn-secondary" title="Stop waiting for this response" onClick={() => aborts.current[active.id]?.abort()}>
+                Cancel
+              </button>
+            ) : (
+              <button className="btn-primary" disabled={!form.url.trim()} onClick={send}>
+                Send
+              </button>
+            )}
+            {form.url.trim() ? (
+              <span className="hint">
+                <kbd>Enter</kbd> in the URL or <kbd>{SEND_KEY}</kbd> in the body also sends
+              </span>
+            ) : (
+              <span className="hint">Enter a URL first.</span>
+            )}
+            <span className="spacer" />
+            <label className="check" title="Request timeout in milliseconds">
+              Timeout
               <input
                 id="http-timeout"
-                className="w-sm"
+                className="w-xs"
                 value={form.timeoutMs}
                 inputMode="numeric"
                 onChange={(e) => set('timeoutMs', e.target.value)}
               />
-              <span className="hint">milliseconds</span>
-            </div>
-          </Section>
+              <span className="faint">ms</span>
+            </label>
+          </div>
         </div>
 
         <div className="right">
@@ -903,36 +984,39 @@ export default function HttpPanel() {
 
           {tab === 'response' && (
             <>
-              {busy && <div className="status busy">Sending {form.method} {form.url}…</div>}
+              {busy && <OutcomeView o={{ ok: false, busy: true, text: `Sending ${form.method} ${form.url}…` }} secrets={[]} />}
               <div className={busy && result ? 'stale' : undefined}>
-              {result &&
-                (result.ok ? (
-                  <div className={`status ${(result.status ?? 0) < 400 ? 'ok' : 'bad'}`}>
-                    <span>
-                      {result.status} {result.statusText}
-                    </span>
-                    {result.durationMs != null && (
-                      <>
-                        <span className="sep">·</span>
-                        <span>{result.durationMs} ms</span>
-                      </>
-                    )}
-                    {result.size != null && (
-                      <>
-                        <span className="sep">·</span>
-                        <span>{fmtBytes(result.size)}</span>
-                      </>
-                    )}
-                    {result.truncated && (
-                      <>
-                        <span className="sep">·</span>
-                        <span>truncated</span>
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  <div className="status bad">Request failed</div>
-                ))}
+              {result && !result.ok && (
+                <OutcomeView
+                  o={{ ok: false, text: result.error, ms: result.durationMs, detail: result.detail, log: result.log }}
+                  secrets={result.secrets ?? []}
+                />
+              )}
+              {result?.ok && (
+                <div className={`status ${(result.status ?? 0) < 400 ? 'ok' : 'bad'}`} role="status">
+                  <span>
+                    {result.status} {result.statusText}
+                  </span>
+                  {result.durationMs != null && (
+                    <>
+                      <span className="sep">·</span>
+                      <span>{result.durationMs} ms</span>
+                    </>
+                  )}
+                  {result.size != null && (
+                    <>
+                      <span className="sep">·</span>
+                      <span>{fmtBytes(result.size)}</span>
+                    </>
+                  )}
+                  {result.truncated && (
+                    <>
+                      <span className="sep">·</span>
+                      <span>truncated</span>
+                    </>
+                  )}
+                </div>
+              )}
               {result?.ok && (
                 <div className="result-bar">
                   {respViews.length > 1 && (
@@ -951,45 +1035,38 @@ export default function HttpPanel() {
                       ))}
                     </div>
                   )}
-                  {result.headers && (
+                  {(result.headers || result.log?.request?.headers) && (
                     <button
                       type="button"
                       className={`btn-ghost btn-sm ${showHeaders ? 'btn-on' : ''}`}
                       aria-pressed={showHeaders}
+                      title="The headers sent and received"
                       onClick={() => setShowHeaders((s) => !s)}
                     >
-                      Headers <span className="count">{Object.keys(result.headers).length}</span>
+                      Headers <span className="count">{Object.keys(result.headers ?? {}).length}</span>
                     </button>
                   )}
+                  <AttemptLogBar log={result.log} secrets={result.secrets ?? []} open={logOpen} onOpenChange={setLogOpen} />
                   <span className="spacer" />
-                  <button
-                    className="btn-ghost btn-sm"
-                    title="Copy the response body"
-                    onClick={() =>
-                      navigator.clipboard.writeText(result.bodyText ?? '').then(
-                        () => flash('Response copied'),
-                        () => flash('Copy failed: the clipboard is not available'),
-                      )
-                    }
-                  >
-                    Copy
-                  </button>
+                  {!result.binary && <CopyButton text={result.bodyText ?? ''} label="Copy body" title="Copy the response body" />}
                 </div>
               )}
-              {result?.ok && showHeaders && result.headers && (
-                <table className="rtable kv-table mb-3">
-                  <tbody>
-                    {Object.entries(result.headers).map(([k, v]) => (
-                      <tr key={k}>
-                        <td>{k}</td>
-                        <td>{v}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              {result?.ok && showHeaders && (result.headers || result.log?.request?.headers) && (
+                <div className="mb-3">
+                  <HeaderTable
+                    title="Request headers (sent)"
+                    rows={result.log?.request?.headers}
+                    mask={result.secrets ?? []}
+                    blankCredentials
+                  />
+                  <HeaderTable title="Response headers" rows={result.headers} />
+                </div>
               )}
               {result ? (
-                <ResponseBody result={result} parsed={parsedResp} view={respViewEff} />
+                result.ok &&
+                !(logOpen && result.log && !result.binary && !result.bodyText) && (
+                  <ResponseBody result={result} parsed={parsedResp} view={respViewEff} />
+                )
               ) : (
                 !busy && (
                   <Empty
@@ -1016,7 +1093,11 @@ export default function HttpPanel() {
             <Empty
               icon="↺"
               title="No requests yet"
-              hint="Every request you send lands here with its response. Click an entry to bring it back."
+              hint={
+                <>
+                  Every request you <kbd>Send</kbd> lands here with its response. Click an entry to bring it back.
+                </>
+              }
             />
           )}
 
@@ -1060,5 +1141,42 @@ export default function HttpPanel() {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Headers as a table, secret values masked. `blankCredentials` also blanks credential headers
+ * (Authorization, cookies, API keys), as the copied log does.
+ */
+function HeaderTable({
+  title,
+  rows,
+  mask = [],
+  blankCredentials = false,
+}: {
+  title: string;
+  rows?: Record<string, string>;
+  mask?: string[];
+  blankCredentials?: boolean;
+}) {
+  const entries = Object.entries(rows ?? {});
+  return (
+    <>
+      <div className="list-label mb-1">{title}</div>
+      {entries.length ? (
+        <table className="rtable kv-table mb-2">
+          <tbody>
+            {entries.map(([k, v]) => (
+              <tr key={k}>
+                <td>{k}</td>
+                <td>{blankCredentials && isSensitiveHeader(k) ? '•••' : maskSecrets(v, mask)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div className="hint mb-2">none</div>
+      )}
+    </>
   );
 }

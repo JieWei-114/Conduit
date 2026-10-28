@@ -5,6 +5,9 @@ import { rowKeyDown, rowTabIndex } from './rowNav';
 import { useDialog } from './useDialog';
 import { Empty, LongField, PanelHead, ReqTabs, Section, usePersist } from './ui';
 import { EXAMPLES } from './examples';
+import { CopyButton, OutcomeView, type Outcome } from './AttemptLog';
+import { downloadJson, downloadText } from './share';
+import type { AttemptError, AttemptLog } from './types';
 
 const LS_FORM = 'conduit.db.form.v1';
 const LS_TABS = 'conduit.db.tabs.v1';
@@ -30,6 +33,9 @@ interface HistItem {
   query: string;
   ok: boolean;
   rowCount?: number;
+  affected?: number | null;
+  durationMs?: number;
+  error?: string;
 }
 
 const PLACEHOLDER_URL: Record<Driver, string> = {
@@ -49,11 +55,77 @@ const DEFAULTS: DbForm = { driver: 'postgres', url: '', query: '' };
 
 interface DbRes {
   ok: boolean;
+  /** column names in SELECT order */
+  columns?: string[];
   rows?: Record<string, unknown>[];
+  /** rows sent back (at most ROWS_CAP), on every driver */
   rowCount?: number;
+  /** how many rows the result had in all, when the server said so and more than were sent */
+  totalRows?: number | null;
+  /** rows an INSERT / UPDATE / DELETE touched; set instead of rows */
+  affected?: number | null;
   truncated?: boolean;
   durationMs?: number;
   error?: string;
+  detail?: AttemptError;
+  log?: AttemptLog;
+  /** values to mask in a copied log: the connection's password */
+  secrets?: string[];
+}
+
+/** The last List tables / collections call of a tab, shown in the schema browser. */
+interface SchemaOutcome {
+  o: Outcome;
+  secrets: string[];
+}
+
+/** Rows the server hands back per query (and so the most a CSV export can hold). */
+const ROWS_CAP = 500;
+/** How long the server lets one query run before it stops it. */
+const QUERY_LIMIT_S = 60;
+const RUN_KEY = navigator.platform.includes('Mac') ? '⌘↵' : 'Ctrl↵';
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** What a query came to, in one line: "20 rows", "First 500 of 1234 rows", "3 rows affected". */
+function resultText(r: DbRes): string {
+  if (r.affected != null) return `${plural(r.affected, 'row')} affected`;
+  const n = r.rowCount ?? r.rows?.length ?? 0;
+  if (!r.truncated) return plural(n, 'row');
+  return r.totalRows != null ? `First ${n} of ${r.totalRows} rows` : `First ${n} rows, more not fetched`;
+}
+
+function resOutcome(r: DbRes): Outcome {
+  return r.ok
+    ? { ok: true, text: resultText(r), ms: r.durationMs, log: r.log }
+    : { ok: false, text: r.error, detail: r.detail, ms: r.durationMs, log: r.log };
+}
+
+function maskDbPassword(url: string): string {
+  return url
+    .replace(/^([a-z][a-z0-9+.-]*:\/\/[^:/?#@\s]*):([^@\s]+)@/i, '$1:••••@')
+    .replace(/(\bpassword\s*=\s*)('(?:[^'\\]|\\.)*'|[^\s&;]+)/gi, '$1••••');
+}
+
+/** The password in a connection URL or a `key=value` connection string, to mask in copied logs. */
+function urlSecrets(raw: string): string[] {
+  const out: string[] = [];
+  try {
+    const u = new URL(raw.trim());
+    if (u.password) {
+      out.push(u.password);
+      try {
+        const dec = decodeURIComponent(u.password);
+        if (dec !== u.password) out.push(dec);
+      } catch {
+        /* not percent-encoded */
+      }
+    }
+  } catch {
+    const m = /(?:^|\s)password=(\S+)/i.exec(raw);
+    if (m) out.push(m[1]);
+  }
+  return out;
 }
 
 function loadJson<T>(key: string, fallback: T): T {
@@ -94,9 +166,9 @@ function queryForTable(driver: Driver, t: string): string {
 function toCsv(rows: Record<string, unknown>[], cols: string[]): string {
   const esc = (v: unknown) => {
     const s = v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  return [cols.join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n');
+  return [cols.map(esc).join(','), ...rows.map((r) => cols.map((c) => esc(r[c])).join(','))].join('\n');
 }
 
 export default function DbPanel() {
@@ -123,10 +195,17 @@ export default function DbPanel() {
   const [resMap, setResMap] = useState<Record<number, DbRes | null>>({});
   const [busyMap, setBusyMap] = useState<Record<number, boolean>>({});
   const [tablesMap, setTablesMap] = useState<Record<number, string[]>>({});
+  const [schemaMap, setSchemaMap] = useState<Record<number, SchemaOutcome | null>>({});
+  const [listingMap, setListingMap] = useState<Record<number, boolean>>({});
   const res = resMap[activeId] ?? null;
   const busy = !!busyMap[activeId];
   const tables = tablesMap[activeId] ?? [];
-  const setTables = (t: string[]) => setTablesMap((m) => ({ ...m, [activeId]: t }));
+  const schema = schemaMap[activeId] ?? null;
+  const listing = !!listingMap[activeId];
+  const setTables = (t: string[]) => {
+    setTablesMap((m) => ({ ...m, [activeId]: t }));
+    setSchemaMap((m) => ({ ...m, [activeId]: null }));
+  };
 
   const set = <K extends keyof DbForm>(k: K, v: DbForm[K]) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -153,6 +232,8 @@ export default function DbPanel() {
     setResMap((m) => { const c = { ...m }; delete c[id]; return c; });
     setBusyMap((m) => { const c = { ...m }; delete c[id]; return c; });
     setTablesMap((m) => { const c = { ...m }; delete c[id]; return c; });
+    setSchemaMap((m) => { const c = { ...m }; delete c[id]; return c; });
+    setListingMap((m) => { const c = { ...m }; delete c[id]; return c; });
     if (id === activeId) setActiveId(next[Math.max(0, idx - 1)].id);
   };
 
@@ -162,66 +243,101 @@ export default function DbPanel() {
   };
 
   const [flashMsg, flash] = useFlash();
-
+  const [urlFocus, setUrlFocus] = useState(false);
+  const driverHist = hist.filter((h) => (h.driver ?? 'postgres') === form.driver);
 
   const loadTables = async () => {
-    if (!form.url.trim()) return;
+    if (!form.url.trim() || listingMap[active.id]) return; // no double submit
     const tid = active.id; // pin — schema must land on the tab it was requested from
+    const secrets = urlSecrets(form.url);
+    const noun = form.driver === 'mongodb' ? 'collection' : 'table';
+    setListingMap((m) => ({ ...m, [tid]: true }));
+    // the outcome stays beside the schema browser, so it never replaces a query result
+    let o: Outcome;
     try {
       const r = await fetch('/api/db/schema', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ driver: form.driver, url: form.url }),
       }).then((x) => x.json());
-      if (r.ok) setTablesMap((m) => ({ ...m, [tid]: r.tables }));
-      else setResMap((m) => ({ ...m, [tid]: { ok: false, error: r.error } }));
+      if (r.ok) {
+        setTablesMap((m) => ({ ...m, [tid]: r.tables }));
+        o = { ok: true, text: plural(r.tables.length, noun), ms: r.durationMs, log: r.log };
+      } else {
+        o = { ok: false, text: r.error, detail: r.detail, ms: r.durationMs, log: r.log };
+      }
     } catch (e) {
-      setResMap((m) => ({ ...m, [tid]: { ok: false, error: String(e) } }));
+      o = { ok: false, text: String(e) };
     }
+    setSchemaMap((m) => ({ ...m, [tid]: { o, secrets } }));
+    setListingMap((m) => ({ ...m, [tid]: false }));
   };
 
+  const aborts = useRef<Record<number, AbortController>>({});
   const run = async (q = form.query) => {
     if (!form.url.trim() || !q.trim() || busyMap[active.id]) return; // no-op while a query runs
     const tid = active.id; // pin the originating tab
     const driver = form.driver;
     setBusyMap((m) => ({ ...m, [tid]: true }));
-    let r: any;
+    let r: DbRes;
+    const ctl = new AbortController();
+    aborts.current[tid] = ctl;
     try {
       r = await fetch('/api/db/query', {
         method: 'POST',
+        signal: ctl.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ ...form, query: q }),
       }).then((x) => x.json());
     } catch (e) {
       r = { ok: false, error: String(e) };
     }
+    delete aborts.current[tid];
+    if (ctl.signal.aborted) {
+      setResMap((m) => ({ ...m, [tid]: { ok: false, error: 'Cancelled: the result was not waited for.' } }));
+      setBusyMap((m) => ({ ...m, [tid]: false }));
+      return;
+    }
+    r.secrets = urlSecrets(form.url);
     setResMap((m) => ({ ...m, [tid]: r }));
+    const item: HistItem = {
+      at: new Date().toISOString(),
+      driver,
+      query: q,
+      ok: !!r.ok,
+      rowCount: r.rowCount,
+      affected: r.affected,
+      durationMs: r.durationMs,
+      error: r.ok ? undefined : r.error,
+    };
     setHist((h) => {
-      const next = [
-        { at: new Date().toISOString(), driver, query: q, ok: !!r.ok, rowCount: r.rowCount },
-        ...h,
-      ].slice(0, HISTORY_MAX);
+      const next = [item, ...h].slice(0, HISTORY_MAX);
       localStorage.setItem(LS_HISTORY, JSON.stringify(next));
       return next;
     });
     setBusyMap((m) => ({ ...m, [tid]: false }));
   };
 
+  // the server's column list keeps SELECT order (object keys would put numeric names first)
   const cols = useMemo(
-    () => (res?.ok && res.rows?.length ? [...new Set(res.rows.flatMap((r) => Object.keys(r)))] : []),
+    () =>
+      res?.ok && res.rows?.length
+        ? res.columns?.length
+          ? res.columns
+          : [...new Set(res.rows.flatMap((r) => Object.keys(r)))]
+        : [],
     [res],
   );
 
-  const download = () => {
+  const exportRows = (fmt: 'csv' | 'json') => {
     if (!res?.ok || !res.rows) return;
-    const csv = toCsv(res.rows, cols);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
-    a.download = `query-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    if (fmt === 'csv') downloadText('db', 'rows', 'csv', toCsv(res.rows, cols), 'text/csv');
+    else downloadJson('db', 'rows', res.rows);
+    if (res.truncated) flash(`The file holds the first ${res.rows.length} rows only (results are capped at ${ROWS_CAP})`);
   };
+  const outcome: Outcome | null = busy ? { ok: true, busy: true, text: 'Running query…' } : res ? resOutcome(res) : null;
 
+  const listLabel = form.driver === 'mongodb' ? 'List collections' : 'List tables';
   const shownTables = tableFilter
     ? tables.filter((t) => t.toLowerCase().includes(tableFilter.toLowerCase()))
     : tables;
@@ -250,7 +366,7 @@ export default function DbPanel() {
         onSelect={setActiveId}
         onClose={closeTab}
         onAdd={addTab}
-        addTitle="New query tab (same connection)"
+        addTitle="New tab with the same connection"
       />
 
       <div className="layout">
@@ -309,7 +425,20 @@ export default function DbPanel() {
                 aria-label="Driver"
                 value={form.driver}
                 onChange={(e) => {
-                  set('driver', e.target.value as Driver);
+                  const next = e.target.value as Driver;
+                  setForm((f) => {
+                    const prev = f.driver;
+                    const urlIsDefault =
+                      !f.url.trim() || f.url.trim() === PLACEHOLDER_URL[prev] || (prev === EXAMPLES.db.driver && f.url.trim() === EXAMPLES.db.url);
+                    const queryIsDefault =
+                      !f.query.trim() || f.query.trim() === PLACEHOLDER_QUERY[prev] || (prev === EXAMPLES.db.driver && f.query.trim() === EXAMPLES.db.query);
+                    return {
+                      ...f,
+                      driver: next,
+                      url: urlIsDefault ? '' : f.url,
+                      query: queryIsDefault ? '' : f.query,
+                    };
+                  });
                   setTables([]);
                 }}
               >
@@ -321,15 +450,30 @@ export default function DbPanel() {
               <LongField
                 url
                 className="grow"
-                value={form.url}
+                value={urlFocus ? form.url : maskDbPassword(form.url)}
                 spellCheck={false}
                 aria-label="Connection URL"
+                title={urlFocus || maskDbPassword(form.url) === form.url ? undefined : 'The password is hidden until you click into the field'}
                 placeholder={PLACEHOLDER_URL[form.driver]}
-                onChange={(v) => set('url', v)}
+                onFocus={() => setUrlFocus(true)}
+                onBlur={() => setUrlFocus(false)}
+                onChange={(v) => urlFocus && set('url', v)}
               />
             </div>
             <div className="hint">
               e.g. <code>{PLACEHOLDER_URL[form.driver]}</code>
+              {form.driver === 'postgres' && (
+                <>
+                  . TLS when the server offers it; add <code>?sslmode=verify-full</code> to check the certificate, and{' '}
+                  <code>&amp;sslrootcert=/path/ca.pem</code> for a cloud database's own CA.
+                </>
+              )}
+              {form.driver === 'mysql' && (
+                <>
+                  . TLS when the server offers it; add <code>?ssl-mode=VERIFY_IDENTITY</code> to check the certificate, and{' '}
+                  <code>&amp;ssl-ca=/path/ca.pem</code> for a cloud database's own CA.
+                </>
+              )}
             </div>
           </Section>
 
@@ -341,17 +485,24 @@ export default function DbPanel() {
               </>
             }
             actions={
-              <button className="btn-secondary btn-sm" onClick={loadTables} disabled={!form.url.trim()} title="Read the schema from this connection">
-                {form.driver === 'mongodb' ? 'List collections' : 'List tables'}
+              <button
+                className="btn-secondary btn-sm"
+                onClick={loadTables}
+                disabled={listing || !form.url.trim()}
+                title={form.url.trim() ? 'Read the schema from this connection' : 'Enter a connection URL first'}
+              >
+                {listing ? 'Listing…' : listLabel}
               </button>
             }
           >
+            <OutcomeView o={listing ? { ok: true, busy: true, text: 'Listing…' } : schema?.o} secrets={schema?.secrets ?? []} />
             {tables.length > 0 ? (
               <>
                 <input placeholder="Filter" aria-label="Filter tables" value={tableFilter} onChange={(e) => setTableFilter(e.target.value)} />
                 <div className="keylist">
                   {shownTables.map((t) => (
-                    <div
+                    <button
+                      type="button"
                       key={t}
                       className="keyrow"
                       onClick={() => {
@@ -361,14 +512,24 @@ export default function DbPanel() {
                       }}
                       title={`Run a first-rows query on ${t}`}
                     >
-                      <span className="kname" title={t}>{t}</span>
-                    </div>
+                      <span className="kname">{t}</span>
+                    </button>
                   ))}
                 </div>
-                <div className="hint">Click a table to see its first rows.</div>
+                <div className="hint">Click a {form.driver === 'mongodb' ? 'collection' : 'table'} to see its first rows.</div>
               </>
             ) : (
-              <div className="hint m-0">List them to click straight into a first-rows query.</div>
+              !schema?.o.ok ? (
+                <Empty
+                  compact
+                  title={form.driver === 'mongodb' ? 'No collections yet' : 'No tables yet'}
+                  hint={
+                    <>
+                      Press <kbd>{listLabel}</kbd> to click straight into a first-rows query.
+                    </>
+                  }
+                />
+              ) : null
             )}
           </Section>
 
@@ -391,75 +552,77 @@ export default function DbPanel() {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) run();
               }}
             />
-            <div className="inline mt-2">
-              <button className="btn-primary" disabled={busy || !form.url.trim() || !form.query.trim()} onClick={() => run()}>
-                {busy ? 'Running…' : 'Run query'}
-              </button>
-              <span className="hint m-0">
-                <kbd>⌘↵</kbd> in the query also runs it
-              </span>
-            </div>
           </Section>
 
-          {hist.length > 0 && (
+          {driverHist.length > 0 && (
             <Section
               title="Recent queries"
               actions={
                 <button
                   className="btn-ghost btn-sm btn-danger"
                   onClick={() => {
-                    setHist([]);
-                    localStorage.removeItem(LS_HISTORY);
+                    const next = hist.filter((h) => (h.driver ?? 'postgres') !== form.driver);
+                    setHist(next);
+                    localStorage.setItem(LS_HISTORY, JSON.stringify(next));
                   }}
-                  title="Forget every remembered query"
+                  title="Forget the remembered queries for this driver"
                 >
                   Clear
                 </button>
               }
             >
               <div className="keylist">
-                {hist.slice(0, 12).map((h, i) => (
+                {driverHist.slice(0, 12).map((h, i) => (
                   <div
                     key={i}
                     className={`keyrow ${h.ok ? '' : 'hist-bad'}`}
                     role="button"
                     tabIndex={rowTabIndex(i)}
-                    title={`Load this query into the box:\n${h.query}`}
+                    title={`Load this query into the box:\n${h.query}${h.error ? `\n\nFailed: ${h.error}` : ''}${
+                      h.durationMs != null ? `\n${h.durationMs} ms` : ''
+                    }`}
                     onClick={() => set('query', h.query)}
                     onKeyDown={rowKeyDown(() => set('query', h.query))}
                   >
-                    <span className="badge">{h.ok ? `${h.rowCount ?? 0} rows` : 'error'}</span>
+                    <span className="badge">
+                      {h.ok ? (h.affected != null ? `${h.affected} affected` : plural(h.rowCount ?? 0, 'row')) : 'error'}
+                      {h.durationMs != null ? ` · ${h.durationMs} ms` : ''}
+                    </span>
                     <span className="kname">{h.query.replace(/\s+/g, ' ').slice(0, 80)}</span>
                   </div>
                 ))}
               </div>
             </Section>
           )}
+
+          <div className="action-bar">
+            {busy ? (
+              <button className="btn-secondary" title="Stop waiting for this query" onClick={() => aborts.current[active.id]?.abort()}>
+                Cancel
+              </button>
+            ) : (
+              <button className="btn-primary" disabled={!form.url.trim() || !form.query.trim()} onClick={() => run()}>
+                Run
+              </button>
+            )}
+            {!form.url.trim() ? (
+              <span className="hint">Enter a connection URL first.</span>
+            ) : !form.query.trim() ? (
+              <span className="hint">Write a query first.</span>
+            ) : (
+              <span className="hint">
+                <kbd>{RUN_KEY}</kbd> in the query also runs it
+              </span>
+            )}
+            <span className="spacer" />
+            <span className="hint">Stops after {QUERY_LIMIT_S} s</span>
+          </div>
         </div>
 
         <div className="right">
-          {busy && <div className="status busy">Running query…</div>}
+          <OutcomeView o={outcome} secrets={res?.secrets ?? []} />
           <div className={busy && res ? 'stale' : undefined}>
-          {res &&
-            (res.ok ? (
-              <div className="status ok">
-                <span>
-                  {res.rowCount} row{res.rowCount === 1 ? '' : 's'}
-                </span>
-                {res.truncated && (
-                  <>
-                    <span className="sep">·</span>
-                    <span>display truncated</span>
-                  </>
-                )}
-                <span className="sep">·</span>
-                <span>{res.durationMs} ms</span>
-              </div>
-            ) : (
-              <div className="status bad">Query failed</div>
-            ))}
-
-          {res?.ok && (
+          {res?.ok && res.affected == null && (
             <div className="result-bar">
               <div className="seg seg-sm" role="group" aria-label="Result view">
                 {(['table', 'json'] as const).map((v) => (
@@ -475,26 +638,41 @@ export default function DbPanel() {
                 ))}
               </div>
               <span className="spacer" />
-              <button
-                className="btn-ghost btn-sm"
-                onClick={() => navigator.clipboard.writeText(JSON.stringify(res.rows, null, 2)).then(() => flash('Rows copied as JSON'))}
-                title="Copy all rows as JSON"
-              >
-                Copy JSON
-              </button>
-              <button className="btn-ghost btn-sm" onClick={download} title="Download all rows as a CSV file">
-                Export CSV
-              </button>
+              {res.rows?.length ? (
+                <>
+                  <CopyButton
+                    label="Copy JSON"
+                    title="Copy the rows shown as JSON"
+                    text={() => JSON.stringify(res.rows, null, 2)}
+                  />
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    onClick={() => exportRows('csv')}
+                    title={`Save the rows shown as a CSV file (at most ${ROWS_CAP})`}
+                  >
+                    Export CSV
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost btn-sm"
+                    onClick={() => exportRows('json')}
+                    title={`Save the rows shown as a JSON file (at most ${ROWS_CAP})`}
+                  >
+                    Export JSON
+                  </button>
+                </>
+              ) : null}
             </div>
           )}
 
           {res == null && !busy && (
             <Empty
               icon="⛁"
-              title="No query run yet"
+              title="No rows yet"
               hint={
                 <>
-                  Paste a connection URL on the left, then click a table or write a query and press <kbd>Run query</kbd>.
+                  Paste a connection URL on the left, then click a table or write a query and press <kbd>Run</kbd>.
                   For a local Postgres try <code>postgres://postgres:postgres@localhost:5432/postgres</code> with{' '}
                   <code>SELECT now()</code>.
                 </>
@@ -506,19 +684,22 @@ export default function DbPanel() {
             </Empty>
           )}
 
-          {res && !res.ok && <pre>{res.error}</pre>}
-          {res?.ok && view === 'json' && <pre>{JSON.stringify(res.rows, null, 2)}</pre>}
-          {res?.ok && view === 'table' &&
+          {res?.ok && res.affected != null && (
+            <div className="hint">
+              The statement returned no rows. Add RETURNING (Postgres) or run a SELECT to see the data.
+            </div>
+          )}
+          {res?.ok && res.affected == null && view === 'json' && <pre>{JSON.stringify(res.rows, null, 2)}</pre>}
+          {res?.ok && res.affected == null && view === 'table' &&
             (cols.length === 0 ? (
               <Empty
-                icon="∅"
-                title="No rows"
-                hint="The query ran but matched nothing. Loosen the WHERE clause, or click a table on the left to see its first rows."
+                compact
+                title="Nothing matched"
+                hint="Loosen the WHERE clause, or click a table on the left to see its first rows."
               />
             ) : (
               <ResultTable rows={res.rows!} cols={cols} onExpand={openCell} />
             ))}
-
           </div>
 
           {expanded && (
@@ -535,9 +716,7 @@ export default function DbPanel() {
                 <div className="modal-head">
                   <span className="out-title">Cell value</span>
                   <span className="spacer" />
-                  <button className="btn-secondary btn-sm" onClick={() => navigator.clipboard.writeText(expanded.v)}>
-                    Copy
-                  </button>
+                  <CopyButton label="Copy value" title="Copy the full value" text={expanded.v} />
                   <button className="btn-ghost btn-sm" onClick={closeExpanded} title="Close (Esc)">
                     Close
                   </button>
@@ -573,7 +752,7 @@ const ResultTable = memo(function ResultTable({
 }) {
   return (
     <div className="table-scroll">
-      <table className="rtable">
+      <table className="rtable data-table">
         <thead>
           <tr>
             {cols.map((c) => (

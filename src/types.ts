@@ -63,6 +63,53 @@ export interface StatusDetails {
   details: { type: string; value: unknown }[];
 }
 
+/** What the failure probe found about the URL's host and port. */
+export interface AttemptProbe {
+  scheme?: string;
+  host?: string;
+  port?: number;
+  error?: string;
+  dns?: { ok: boolean; ms: number; addresses?: string[]; error?: string };
+  tcp?: { ok: boolean; ms: number; address: string; error?: string } | null;
+}
+
+/** Why a request failed, from the server's attempt record. */
+export interface AttemptError {
+  stage: string;
+  kind: string;
+  message: string;
+  /** every cause, outermost first */
+  chain: string[];
+  hints: string[];
+  probe?: AttemptProbe | null;
+}
+
+/** One request, success or failure, as the server recorded it. */
+export interface AttemptLog {
+  method: string;
+  url: string;
+  requestTime: string;
+  respondTime: string;
+  durationMs: number;
+  request: { headers: Record<string, string>; body: unknown; bytes: number };
+  response: {
+    status: number;
+    headers: Record<string, string>;
+    trailers?: Record<string, string> | null;
+    body: unknown;
+    bytes: number;
+  } | null;
+  error: AttemptError | null;
+  networkStats: {
+    sentBytes: number;
+    receivedBytes: number;
+    sentKBps: number;
+    receivedKBps: number;
+    elapsedSec: number;
+    source: string;
+  };
+}
+
 export type CallResult =
   | {
       ok: true;
@@ -81,13 +128,18 @@ export type CallResult =
       /** parsed gRPC trailers (grpc-status/message + custom) */
       trailers?: Record<string, string>;
       statusDetails?: StatusDetails | null;
+      log?: AttemptLog;
     }
   | {
       ok: false;
-      stage: 'encode' | 'network' | 'gateway' | 'timeout';
+      /** where it stopped: before sending (`encode`, `request`), on the way (`network`, `timeout`, `body`, `call`), or at a gateway that did not answer gRPC */
+      stage: 'encode' | 'request' | 'network' | 'timeout' | 'body' | 'call' | 'gateway';
       httpStatus?: number;
       error: string;
       durationMs?: number;
+      /** why, when the request was sent and failed on the way */
+      detail?: AttemptError;
+      log?: AttemptLog;
     };
 
 export interface HistoryEntry {
@@ -112,6 +164,9 @@ export interface HistoryEntry {
     httpStatus?: number;
     durationMs?: number;
     frames?: number;
+    /** why it failed and its record, masked, so a restored failure reads as it did */
+    detail?: AttemptError | null;
+    log?: AttemptLog | null;
   };
 }
 
@@ -130,7 +185,7 @@ export interface RedisKeyView {
   key: string;
   type: RedisType;
   ttl: number; // seconds, -1 = no expiry, -2 = missing
-  /** shape depends on type: string→string, hash→[field,val][], zset→[member,score][], list/set→string[] */
+  /** shape depends on type: string→string, hash→[field,val][], zset→[member,score][], list/set→string[], stream→{ id, fields: [field, value][] }[] */
   value: unknown;
   /** true member count — `value` holds ~500 elements per page */
   total?: number;

@@ -9,6 +9,7 @@ export const EXAMPLES = {
   redis: { host: '127.0.0.1', port: '6379' },
   db: { driver: 'postgres' as const, url: 'postgres://postgres:postgres@localhost:5432/postgres', query: 'SELECT now(), version();' },
   ws: { url: 'wss://echo.websocket.org' },
+  sse: { url: 'https://stream.wikimedia.org/v2/stream/recentchange' },
   utils: { template: 'hmac' },
 };
 

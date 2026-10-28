@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { LongField, Section } from './ui';
 
 /**
@@ -80,9 +80,11 @@ function claimValue(k: string, v: unknown): string {
 export default function AuthBox({
   value,
   onChange,
+  note,
 }: {
   value: AuthState;
   onChange: (next: AuthState) => void;
+  note?: ReactNode;
 }) {
   const a = { ...AUTH_DEFAULTS, ...value };
   const set = <K extends keyof AuthState>(k: K, v: AuthState[K]) => onChange({ ...a, [k]: v });
@@ -238,6 +240,7 @@ export default function AuthBox({
           </table>
         </div>
       )}
+      {note && <div className="hint">{note}</div>}
     </Section>
   );
 }

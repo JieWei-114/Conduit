@@ -1,3 +1,4 @@
+import { CopyButton } from './AttemptLog';
 import {
   memo,
   useCallback,
@@ -217,13 +218,18 @@ export function LongField({
     const el = ref.current;
     if (!el || typeof ResizeObserver === 'undefined') return;
     let width = el.clientWidth;
+    let frame = 0;
     const ro = new ResizeObserver(() => {
       if (el.clientWidth === width) return;
       width = el.clientWidth;
-      fitHeight(el);
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => fitHeight(el));
     });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+    };
   }, []);
 
   const pick = (o: string) => {
@@ -428,16 +434,10 @@ export const FeedRow = memo(function FeedRow({
       <div className="feed-top">
         <span className="feed-ch">{channel}</span>
         <span className="feed-time">{timeOf(at)}</span>
+        {copy && text && <CopyButton text={text} title="Copy this message" />}
       </div>
       {meta && <div className="feed-props">{meta}</div>}
       {text && <div className="feed-msg">{shown}</div>}
-      {copy && text && (
-        <div className="feed-actions">
-          <button type="button" className="btn-ghost btn-sm" onClick={() => navigator.clipboard.writeText(text)}>
-            Copy
-          </button>
-        </div>
-      )}
     </div>
   );
 });

@@ -1,35 +1,63 @@
 import { useState } from 'react';
 import { Empty, LongField, PanelHead } from './ui';
+import { CopyButton } from './AttemptLog';
 import { useExample } from './examples';
 import RecipeEditor from './RecipeEditor';
 
 // ── tiny helpers ────────────────────────────────────────────────────────────
 const b64utf8 = (s: string) => btoa(unescape(encodeURIComponent(s)));
-const unb64utf8 = (s: string) => decodeURIComponent(escape(atob(s.trim())));
 
-function toHex(s: string): string {
-  return Array.from(new TextEncoder().encode(s))
+/** Bytes from standard Base64 or base64url (`-`/`_`), with or without `=` padding; whitespace ignored. */
+function b64bytes(input: string): Uint8Array {
+  let s = input.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(s)) {
+    const bad = s.match(/[^A-Za-z0-9+/=]/)?.[0];
+    throw new Error(bad ? `not Base64: unexpected character "${bad}"` : 'not Base64: "=" padding only belongs at the end');
+  }
+  s = s.replace(/=+$/, '');
+  if (s.length % 4 === 1) throw new Error('not Base64: the length is one character too long or too short');
+  s += '='.repeat((4 - (s.length % 4)) % 4);
+  const bin = atob(s);
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+function unb64utf8(s: string): string {
+  const bytes = b64bytes(s);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`valid Base64, but the ${bytes.length} decoded bytes are not UTF-8 text. Hex: ${toHexBytes(bytes)}`);
+  }
+}
+
+function toHexBytes(bytes: Uint8Array): string {
+  return Array.from(bytes)
     .map((b) => b.toString(16).padStart(2, '0'))
     .join(' ');
 }
+function toHex(s: string): string {
+  return toHexBytes(new TextEncoder().encode(s));
+}
 function fromHex(s: string): string {
   const clean = s.replace(/0x/gi, '').replace(/[\s,]+/g, '');
+  if (!/^[0-9a-f]*$/i.test(clean)) throw new Error(`not hex: unexpected character "${clean.match(/[^0-9a-f]/i)?.[0]}"`);
   if (clean.length % 2) throw new Error('odd number of hex digits');
   const bytes = new Uint8Array(clean.length / 2);
   for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  return new TextDecoder().decode(bytes);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error('valid hex, but the bytes are not UTF-8 text');
+  }
 }
 
-function uuidv4(): string {
-  const h = '0123456789abcdef';
-  let out = '';
-  for (let i = 0; i < 36; i++) {
-    if (i === 8 || i === 13 || i === 18 || i === 23) out += '-';
-    else if (i === 14) out += '4';
-    else if (i === 19) out += h[8 + Math.floor(Math.random() * 4)];
-    else out += h[Math.floor(Math.random() * 16)];
+/** A lone surrogate (half an emoji, say) has no UTF-8 form: name it instead of a bare URIError. */
+function utf8Guard<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (e) {
+    if (e instanceof URIError) throw new Error(`${e.message}: the text has a lone surrogate (half a character), or a malformed %-escape`);
+    throw e;
   }
-  return out;
 }
 
 const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -47,7 +75,7 @@ function describeField(f: string, unit: string, names?: string[]): string {
 }
 function describeCron(expr: string): string {
   const p = expr.trim().split(/\s+/);
-  if (p.length !== 5) return '⚠ expected 5 fields: minute hour day-of-month month day-of-week';
+  if (p.length !== 5) throw new Error(`Expected 5 fields (minute, hour, day-of-month, month, day-of-week), got ${p.length}.`);
   const [mi, ho, dom, mo, dow] = p;
   const parts = [
     describeField(mi, 'minute'),
@@ -62,24 +90,28 @@ function describeCron(expr: string): string {
 function browserNow(): number {
   return Date.now();
 }
-function safe(fn: () => string, input: string, showErr = false): string {
-  if (!input.trim()) return '';
+/** The output of `fn` for `input`, or why there is none. */
+interface Out {
+  value: string;
+  error?: string;
+}
+function safe(fn: () => string, input: string): Out {
+  if (!input.trim()) return { value: '' };
   try {
-    return fn();
+    return { value: fn() };
   } catch (e) {
-    return showErr ? `⚠ ${(e as Error).message}` : '';
+    return { value: '', error: (e as Error).message || String(e) };
   }
 }
 
-function CopyOut({ value }: { value: string }) {
+/** An output with its Copy button, or why there is none (shown as an error, never copied). */
+function CopyOut({ value, error }: { value: string; error?: string }) {
+  if (error) return <div className="error">{error}</div>;
   if (!value) return null;
-  const copy = () => navigator.clipboard.writeText(value);
   return (
     <div className="util-out">
       <pre>{value}</pre>
-      <button type="button" className="chip" onClick={copy}>
-        Copy
-      </button>
+      <CopyButton text={value} />
     </div>
   );
 }
@@ -111,20 +143,19 @@ export default function UtilsPanel() {
   const [cron, setCron] = useState('');
   const [uuids, setUuids] = useState<string[]>([]);
 
-  const tsOut = (() => {
+  const tsOut = safe(() => {
     const t = ts.trim();
-    if (!t) return '';
     const n = Number(t);
-    if (!Number.isNaN(n) && t !== '') {
+    if (!Number.isNaN(n)) {
       const ms = t.length > 10 ? n : n * 1000;
       const d = new Date(ms);
-      if (Number.isNaN(d.getTime())) return '⚠ invalid';
+      if (Number.isNaN(d.getTime())) throw new Error(`${t} is out of the range a date can hold.`);
       return `ISO   ${d.toISOString()}\nlocal ${d.toLocaleString()}\nunix  ${Math.floor(ms / 1000)} s · ${ms} ms`;
     }
     const d = new Date(t);
-    if (Number.isNaN(d.getTime())) return '⚠ not a number or parseable date';
+    if (Number.isNaN(d.getTime())) throw new Error('Not a number or a date this browser can read, e.g. 1700000000 or 2026-08-17T10:00:00Z.');
     return `unix  ${Math.floor(d.getTime() / 1000)} s · ${d.getTime()} ms\nISO   ${d.toISOString()}`;
-  })();
+  }, ts);
 
   const title = (id: Tool) => {
     const n = NAV.find((x) => x.id === id)!;
@@ -160,17 +191,17 @@ export default function UtilsPanel() {
         {sel === 'base64' && (
           <>
             {title('base64')}
-            <textarea rows={3} value={b64in} spellCheck={false} placeholder="text or base64…" onChange={(e) => setB64in(e.target.value)} />
+            <textarea rows={3} value={b64in} spellCheck={false} aria-label="Text or Base64" placeholder="text or base64…" onChange={(e) => setB64in(e.target.value)} />
             {b64in.trim() ? (
               <>
                 <label>Encoded</label>
-                <CopyOut value={safe(() => b64utf8(b64in), b64in)} />
+                <CopyOut {...safe(() => utf8Guard(() => b64utf8(b64in)), b64in)} />
                 <label>Decoded</label>
-                <div className="hint">Blank when the input is not valid Base64.</div>
-                <CopyOut value={safe(() => unb64utf8(b64in), b64in)} />
+                <div className="hint">Standard Base64 or base64url (<code className="mono">-</code>/<code className="mono">_</code>), padding optional.</div>
+                <CopyOut {...safe(() => unb64utf8(b64in), b64in)} />
               </>
             ) : (
-              <Empty icon="⇄" title="No conversion yet" hint="Paste text or a Base64 string above. Both directions are computed as you type." />
+              <Empty icon="⇄" title="No input yet" hint="Paste text or a Base64 string above. Both directions are computed as you type." />
             )}
           </>
         )}
@@ -178,17 +209,17 @@ export default function UtilsPanel() {
         {sel === 'hex' && (
           <>
             {title('hex')}
-            <textarea rows={3} value={hexin} spellCheck={false} placeholder="text, or: 68 65 6c 6c 6f" onChange={(e) => setHexin(e.target.value)} />
+            <textarea rows={3} value={hexin} spellCheck={false} aria-label="Text or hex" placeholder="text, or: 68 65 6c 6c 6f" onChange={(e) => setHexin(e.target.value)} />
             {hexin.trim() ? (
               <>
                 <label>Text as hex</label>
-                <CopyOut value={safe(() => toHex(hexin), hexin)} />
+                <CopyOut {...safe(() => toHex(hexin), hexin)} />
                 <label>Hex as text</label>
                 <div className="hint">Accepts spaces, commas and <code className="mono">0x</code> prefixes.</div>
-                <CopyOut value={safe(() => fromHex(hexin), hexin, true)} />
+                <CopyOut {...safe(() => fromHex(hexin), hexin)} />
               </>
             ) : (
-              <Empty icon="⇄" title="No conversion yet" hint="Type text to see its bytes, or paste hex bytes to read them back as text." />
+              <Empty icon="⇄" title="No input yet" hint="Type text to see its bytes, or paste hex bytes to read them back as text." />
             )}
           </>
         )}
@@ -196,17 +227,17 @@ export default function UtilsPanel() {
         {sel === 'url' && (
           <>
             {title('url')}
-            <textarea rows={3} value={urlin} spellCheck={false} placeholder="value with spaces & symbols…" onChange={(e) => setUrlin(e.target.value)} />
+            <textarea rows={3} value={urlin} spellCheck={false} aria-label="Value to encode or decode" placeholder="value with spaces & symbols…" onChange={(e) => setUrlin(e.target.value)} />
             {urlin.trim() ? (
               <>
                 <label>Encoded</label>
                 <div className="hint">Percent-encoded with <code className="mono">encodeURIComponent</code>, safe for a query value.</div>
-                <CopyOut value={safe(() => encodeURIComponent(urlin), urlin)} />
+                <CopyOut {...safe(() => utf8Guard(() => encodeURIComponent(urlin)), urlin)} />
                 <label>Decoded</label>
-                <CopyOut value={safe(() => decodeURIComponent(urlin), urlin, true)} />
+                <CopyOut {...safe(() => utf8Guard(() => decodeURIComponent(urlin)), urlin)} />
               </>
             ) : (
-              <Empty icon="⇄" title="No conversion yet" hint="Paste a raw value or an already-encoded one. Both directions are computed as you type." />
+              <Empty icon="⇄" title="No input yet" hint="Paste a raw value or an already-encoded one. Both directions are computed as you type." />
             )}
           </>
         )}
@@ -214,16 +245,16 @@ export default function UtilsPanel() {
         {sel === 'json' && (
           <>
             {title('json')}
-            <textarea rows={6} value={jsonin} spellCheck={false} placeholder='{"a":1,"b":[2,3]}' onChange={(e) => setJsonin(e.target.value)} />
+            <textarea rows={6} value={jsonin} spellCheck={false} aria-label="JSON" placeholder='{"a":1,"b":[2,3]}' onChange={(e) => setJsonin(e.target.value)} />
             {jsonin.trim() ? (
               <>
                 <label>Pretty</label>
-                <CopyOut value={safe(() => JSON.stringify(JSON.parse(jsonin), null, 2), jsonin, true)} />
+                <CopyOut {...safe(() => JSON.stringify(JSON.parse(jsonin), null, 2), jsonin)} />
                 <label>Minified</label>
-                <CopyOut value={safe(() => JSON.stringify(JSON.parse(jsonin)), jsonin, true)} />
+                <CopyOut {...safe(() => JSON.stringify(JSON.parse(jsonin)), jsonin)} />
               </>
             ) : (
-              <Empty icon="{ }" title="Nothing to format" hint="Paste a JSON object or array above to get an indented and a one-line version." />
+              <Empty icon="{ }" title="No JSON yet" hint="Paste a JSON object or array above to get an indented and a one-line version." />
             )}
           </>
         )}
@@ -238,12 +269,16 @@ export default function UtilsPanel() {
               <button className="btn-secondary btn-sm" onClick={() => setTs(String(Math.floor(browserNow() / 1000)))}>Now (s)</button>
               <button className="btn-secondary btn-sm" onClick={() => setTs(String(browserNow()))}>Now (ms)</button>
             </div>
-            {tsOut ? (
+            {ts.trim() ? (
               <div className="mt-3">
-                <CopyOut value={tsOut} />
+                <CopyOut {...tsOut} />
               </div>
             ) : (
-              <Empty icon="⏱" title="No time to show" hint="Enter a Unix timestamp such as 1700000000 or an ISO date, or press Now to start from the current time." />
+              <Empty
+                icon="⏱"
+                title="No timestamp yet"
+                hint={<>Enter a Unix timestamp such as 1700000000 or an ISO date, or press <kbd>Now (s)</kbd> to start from the current time.</>}
+              />
             )}
           </>
         )}
@@ -256,10 +291,10 @@ export default function UtilsPanel() {
             <div className="hint">Five fields, in order: minute, hour, day-of-month, month, day-of-week.</div>
             {cron.trim() ? (
               <div className="mt-3">
-                <CopyOut value={describeCron(cron)} />
+                <CopyOut {...safe(() => describeCron(cron), cron)} />
               </div>
             ) : (
-              <Empty icon="⏲" title="Nothing to explain" hint="Enter a 5-field cron expression above to read back the schedule it describes." />
+              <Empty icon="⏲" title="No expression yet" hint="Enter a 5-field cron expression above to read back the schedule it describes." />
             )}
           </>
         )}
@@ -267,9 +302,9 @@ export default function UtilsPanel() {
         {sel === 'uuid' && (
           <>
             {title('uuid')}
-            <div className="hint mb-2">Uses <code className="mono">Math.random</code>, so these are fine for fixtures but not for anything security-related.</div>
+            <div className="hint mb-2">From <code className="mono">crypto.randomUUID()</code>, the browser's cryptographically secure generator.</div>
             <div className="inline">
-              <button className="btn-primary" onClick={() => setUuids((u) => [uuidv4(), ...u].slice(0, 20))}>Generate</button>
+              <button className="btn-primary" onClick={() => setUuids((u) => [crypto.randomUUID(), ...u].slice(0, 20))}>Generate</button>
               {uuids.length > 0 && (
                 <button className="btn-ghost btn-danger" onClick={() => setUuids([])}>Clear</button>
               )}
@@ -279,7 +314,7 @@ export default function UtilsPanel() {
                 <CopyOut value={uuids.join('\n')} />
               </div>
             ) : (
-              <Empty icon="⌗" title="No UUIDs yet" hint="Press Generate for a fresh v4 UUID. The last 20 are kept so you can copy them as a block." />
+              <Empty icon="⌗" title="No UUIDs yet" hint={<>Press <kbd>Generate</kbd> for a fresh v4 UUID. The last 20 are kept so you can copy them as a block.</>} />
             )}
           </>
         )}

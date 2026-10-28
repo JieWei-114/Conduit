@@ -3,59 +3,146 @@ import { useFlash } from './useFlash';
 import { SaveAs } from './SaveAs';
 import { useArmedConfirm } from './useArmedConfirm';
 import type { RedisKeyView, RedisType } from './types';
-import { Empty, FeedRow, LongField, PanelHead, Section, tryJson, useStableCallback } from './ui';
+import { ConnPill, Empty, FeedRow, LongField, PanelHead, Section, tryJson, useStableCallback } from './ui';
 import { EXAMPLES, useExample } from './examples';
+import { CopyButton, OutcomeView, type Outcome } from './AttemptLog';
+import { downloadJson } from './share';
+import { rowKeyDown, rowTabIndex } from './rowNav';
 
 const LS_CONNS = 'conduit.redis.conns.v3';
 const LS_LAST = 'conduit.redis.last.v2';
+const LS_HISTORY = 'conduit.redis.history.v1';
+const HISTORY_MAX = 100;
+
+/** What a failed call answered, as an outcome. */
+const failed = (r: any): Outcome => ({
+  ok: false,
+  text: String(r?.error ?? 'failed'),
+  ms: r?.durationMs,
+  detail: r?.detail ?? undefined,
+  log: r?.log ?? undefined,
+});
+
+/** A successful call's outcome, said as `text`. */
+const succeeded = (r: any, text: string): Outcome => ({ ok: true, text, ms: r?.durationMs, log: r?.log ?? undefined });
+
+/** An operation still running, said as `text` ("Scanning…"). */
+const running = (text: string): Outcome => ({ ok: true, busy: true, text });
+
+/** `n` and the noun, plural when it is not 1: "1 key", "3 keys". */
+const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** The modifier key's name for keyboard hints. */
+const MOD_KEY = navigator.platform.includes('Mac') ? '⌘↵' : 'Ctrl↵';
+
+/**
+ * A TTL typed by a person, checked before it is sent: a whole number of seconds, positive, or -1
+ * to remove the expiry. 0 is let through: the server refuses it and says to use Delete.
+ */
+function checkTtl(raw: string): { ttl: number } | { error: string } {
+  const t = raw.trim();
+  if (!/^-?\d+$/.test(t)) return { error: 'TTL must be a whole number of seconds, or -1 to remove the expiry' };
+  const n = Number(t);
+  if (n < -1) return { error: 'TTL must be a positive number of seconds, or -1 to remove the expiry' };
+  return { ttl: n };
+}
+
+/** A stream entry as the server sends it. */
+interface StreamEntry {
+  id: string;
+  fields: [string, string | null][];
+}
+
+/** One line of the batch runner's history. */
+interface HistoryItem {
+  at: string;
+  command: string;
+  ok: boolean;
+  error?: string;
+  ms?: number;
+}
+
+function loadHistory(): HistoryItem[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_HISTORY) ?? '[]');
+    return Array.isArray(raw) ? raw : [];
+  } catch {
+    return [];
+  }
+}
+
+/** `items` (newest last, as run) in front of `prev`, newest first, at most `max`. */
+function addHistory(prev: HistoryItem[], items: HistoryItem[], max = HISTORY_MAX): HistoryItem[] {
+  return [...[...items].reverse(), ...prev].slice(0, max);
+}
 
 interface Conn {
   name: string;
   host: string;
   port: string;
+  username?: string;
   password: string;
   db: string;
+  tls?: boolean;
 }
 
-/** Parse a redis://[:pass@]host:port[/db] string into parts (for migration). */
-function parseUrl(url: string): Omit<Conn, 'name'> {
+type ConnParts = Omit<Conn, 'name'>;
+
+function parseUrl(url: string): ConnParts {
   try {
     const u = new URL(url.includes('://') ? url : `redis://${url}`);
     return {
-      host: u.hostname,
+      host: u.hostname.replace(/^\[|\]$/g, ''),
       port: u.port || '6379',
+      username: decodeURIComponent(u.username || ''),
       password: decodeURIComponent(u.password || ''),
       db: u.pathname.replace(/^\//, ''),
+      tls: u.protocol === 'rediss:',
     };
   } catch {
     return { host: url, port: '6379', password: '', db: '' };
   }
 }
 
-function buildUrl(c: { host: string; port: string; password: string; db: string }): string {
+/** Whether the Host field holds a rediss:// URL, which turns TLS on whatever the checkbox says. */
+function hostWantsTls(host: string): boolean {
+  return /^\s*rediss:\/\//i.test(host);
+}
+
+function buildUrl(c: ConnParts): string {
   let host = c.host.trim();
   let port = (c.port || '6379').trim();
+  let username = c.username?.trim() ?? '';
   let password = c.password;
   let db = c.db;
+  let tls = !!c.tls;
 
-  // tolerate a full url or a host:port pasted into the Host field
   if (/:\/\//.test(host)) {
     const p = parseUrl(host);
     host = p.host;
     port = p.port;
+    if (p.username) username = p.username;
     if (p.password) password = p.password;
     if (p.db) db = p.db;
+    if (p.tls) tls = true;
   } else {
-    const m = host.match(/^(.+):(\d+)$/); // host:port → split so we don't double the port
-    if (m) {
+    const m = host.match(/^(.+):(\d+)$/);
+    if (m && !m[1].includes(':')) {
       host = m[1];
       port = m[2];
     }
   }
 
-  const auth = password ? `:${encodeURIComponent(password)}@` : '';
+  const auth = username || password
+    ? `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ''}@`
+    : '';
+  const h = host.includes(':') ? `[${host}]` : host;
   const d = db && db !== '0' ? `/${db}` : '';
-  return `redis://${auth}${host}:${port}${d}`;
+  return `${tls ? 'rediss' : 'redis'}://${auth}${h}:${port}${d}`;
+}
+
+function shownUrl(url: string): string {
+  return url.replace(/^(rediss?:\/\/[^:@/]*):[^@]*@/, '$1:***@');
 }
 
 function loadConns(): Conn[] {
@@ -158,18 +245,46 @@ export default function RedisPanel() {
   })();
   const [host, setHost] = useState<string>(last.host ?? '127.0.0.1');
   const [port, setPort] = useState<string>(last.port ?? '6379');
+  const [username, setUsername] = useState<string>(last.username ?? '');
   const [password, setPassword] = useState<string>(last.password ?? '');
   const [db, setDb] = useState<string>(last.db ?? '');
-  const url = buildUrl({ host, port, password, db });
+  const [tls, setTls] = useState<boolean>(!!last.tls);
+  const tlsOn = tls || hostWantsTls(host);
+  const url = buildUrl({ host, port, username, password, db, tls: tlsOn });
   const [conns, setConns] = useState(loadConns);
   const [pickedConn, setPickedConn] = useState('');
   const [view, setView] = useState<RedisKeyView | null>(null);
-  const [status, setStatus] = useState('');
+  // reading the open key (open, Refresh, Load more): busy, time taken, the record, or why it failed
+  const [viewRead, setViewRead] = useState<Outcome | null>(null);
+  // changing the open key (TTL, add, remove, delete), shown next to the value
+  const [editStatus, setEditStatus] = useState<Outcome | null>(null);
+  const [keyOutLatest, setKeyOutLatest] = useState<'read' | 'edit'>('read');
+  const setRead = (o: Outcome | null) => {
+    setViewRead(o);
+    if (o) setKeyOutLatest('read');
+  };
+  const setEdit = (o: Outcome | null) => {
+    setEditStatus(o);
+    if (o) setKeyOutLatest('edit');
+  };
+  const [pingStatus, setPingStatus] = useState<Outcome | null>(null);
+  // scanning and opening from the key list, shown under the Scan box
+  const [keysStatus, setKeysStatus] = useState<Outcome | null>(null);
+  const secrets = password ? [password] : [];
   const [fmtJsonOn, setFmtJsonOn] = useState(true);
   const [rtab, setRtab] = useState<'value' | 'commands' | 'pubsub' | 'info'>('value');
 
   // prefix drill-down browser
-  interface Child { seg: string; full: string; type?: RedisType; isKey: boolean; hasChildren: boolean; count: number }
+  interface Child {
+    seg: string;
+    full: string;
+    type?: RedisType | null;
+    /** why TYPE could not be read for this key (no permission, another cluster node…) */
+    error?: string;
+    isKey: boolean;
+    hasChildren: boolean;
+    count: number;
+  }
   const [path, setPath] = useState(''); // the single key/prefix box
   const [children, setChildren] = useState<Child[]>([]);
   const [levelFilter, setLevelFilter] = useState('');
@@ -179,22 +294,34 @@ export default function RedisPanel() {
   const [channel, setChannel] = useState('');
   const [pubMsg, setPubMsg] = useState('');
   const [subChannels, setSubChannels] = useState('');
-  const [feed, setFeed] = useState<{ id: number; channel: string; message: string; at: string }[]>([]);
+  const [feed, setFeed] = useState<{ id: number; channel: string; message: string; at: string; note?: string }[]>([]);
+  const [feedFilter, setFeedFilter] = useState('');
   const feedIdRef = useRef(0);
   const esRef = useRef<EventSource | null>(null);
-  const [subscribed, setSubscribed] = useState(false);
+  const [subState, setSubState] = useState<'idle' | 'connecting' | 'live' | 'error'>('idle');
+  const [pubStatus, setPubStatus] = useState<Outcome | null>(null);
+  const [subStatus, setSubStatus] = useState<Outcome | null>(null);
 
   useEffect(() => {
-    localStorage.setItem(LS_LAST, JSON.stringify({ host, port, password, db }));
-  }, [host, port, password, db]);
+    localStorage.setItem(LS_LAST, JSON.stringify({ host, port, username, password, db, tls }));
+  }, [host, port, username, password, db, tls]);
+
+  const keysBusy = !!keysStatus?.busy;
 
   const loadChildren = async (prefix: string) => {
+    setKeysStatus(running('Scanning…'));
     const r = await post('children', { url, prefix });
-    if (!r.ok) return setStatus(`✗ ${r.error}`);
+    if (!r.ok) return setKeysStatus(failed(r));
     setPath(prefix);
     setChildren(r.children);
     setLevelFilter('');
-    setStatus(`${r.children.length} at "${prefix || 'root'}"${r.truncated ? ' (truncated)' : ''}`);
+    const where = prefix ? `under ${prefix}` : 'at the top level';
+    setKeysStatus(
+      succeeded(
+        r,
+        `${plural(r.children.length, 'entry', 'entries')} ${where}${r.truncated ? ' (scan capped: narrow the prefix for the rest)' : ''}`,
+      ),
+    );
   };
   const drill = (full: string) => {
     setCommandsKey(full);
@@ -202,17 +329,31 @@ export default function RedisPanel() {
   };
   const crumbTo = (prefix: string) => loadChildren(prefix);
 
-  // one box: Enter → open if it's an exact key, else browse it as a prefix
+  const showView = (r: any, quiet = false) => {
+    if (r.view.key !== view?.key) setEdit(null);
+    setView(r.view);
+    if (!quiet) setRead(succeeded(r, 'Read'));
+    setCommandsKey(r.view.key);
+  };
+
+  // one box: Enter → open if it's an exact key, else browse it as a prefix. Only a key that
+  // does not exist is browsed; any other failure (a refused connection, say) is shown.
   const go = async () => {
+    if (keysBusy) return;
     const v = path.trim();
     if (!v) return loadChildren('');
+    setKeysStatus(running('Scanning…'));
     const r = await post('get', { url, key: v });
     if (r.ok) {
-      setView(r.view);
-      setCommandsKey(v);
-    } else {
-      loadChildren(v);
-    }
+      setKeysStatus(null);
+      showView(r);
+      setChildren((cs) =>
+        cs.some((c) => c.full === v)
+          ? cs
+          : [{ seg: v, full: v, type: r.view.type, isKey: true, hasChildren: false, count: 1 }],
+      );
+    } else if (r.missing) loadChildren(v);
+    else setKeysStatus(failed(r));
   };
 
   const persistConns = (next: Conn[]) => {
@@ -225,8 +366,10 @@ export default function RedisPanel() {
     if (c) {
       setHost(c.host);
       setPort(c.port);
+      setUsername(c.username ?? '');
       setPassword(c.password);
       setDb(c.db);
+      setTls(!!c.tls);
     }
   };
   const [flashMsg, flash] = useFlash();
@@ -237,27 +380,44 @@ export default function RedisPanel() {
   };
 
   const ping = async () => {
+    setPingStatus(running('Pinging…'));
     const r = await post('ping', { url });
-    setStatus(
+    setPingStatus(
       r.ok
-        ? `PONG ✓${r.cluster ? ` · cluster, ${r.masters} masters` : ''}${r.note ? ` · ⚠ ${r.note}` : ''}`
-        : `✗ ${r.error}`,
+        ? succeeded(
+            r,
+            `${r.pong ?? 'PONG'}${r.cluster ? ` · cluster, ${plural(r.masters, 'master')}` : ''}${r.note ? ` · ${r.note}` : ''}`,
+          )
+        : failed(r),
     );
   };
 
+  // open a key from the list: a failure is shown under the list, the value on the right
   const openKey = async (key: string) => {
+    if (keysBusy) return;
+    setKeysStatus(running(`Opening ${key}…`));
     const r = await post('get', { url, key });
-    if (!r.ok) return setStatus(`✗ ${r.error}`);
-    setView(r.view);
-    setCommandsKey(key);
+    if (!r.ok) return setKeysStatus(failed(r));
+    setKeysStatus(null);
+    showView(r);
   };
-  const refreshKey = () => view && openKey(view.key);
+
+  // read the open key again, after a change or on Refresh: the outcome shows next to the value
+  const rereadKey = async (quiet = false) => {
+    if (!view) return;
+    if (!quiet) setRead(running('Reading…'));
+    const r = await post('get', { url, key: view.key });
+    if (!r.ok) return setRead(failed(r));
+    showView(r, quiet);
+  };
 
   // fetch the next ~500 elements and APPEND to the current view
   const loadMoreValue = async () => {
     if (!view?.nextCursor) return;
+    setRead(running('Loading more…'));
     const r = await post('get', { url, key: view.key, cursor: view.nextCursor });
-    if (!r.ok) return setStatus(`✗ ${r.error}`);
+    if (!r.ok) return setRead(failed(r));
+    setRead(succeeded(r, 'Read'));
     setView((v) =>
       v
         ? {
@@ -272,51 +432,112 @@ export default function RedisPanel() {
 
   const delKey = async (member?: string) => {
     if (!view) return;
-    const r = await post('del', { url, key: view.key, type: view.type, member });
-    if (!r.ok) return setStatus(`✗ ${r.error}`);
-    if (member) refreshKey();
-    else {
+    const key = view.key;
+    setEdit(running(member != null ? 'Removing…' : 'Deleting…'));
+    const r = await post('del', { url, key, type: view.type, member });
+    if (!r.ok) return setEdit(failed(r));
+    if (member != null) {
+      const what =
+        view.type === 'stream' ? 'entry' : view.type === 'hash' ? 'field' : view.type === 'list' ? 'element' : 'member';
+      setEdit(succeeded(r, r.removed === 0 ? `Nothing removed: that ${what} is no longer in ${key}` : `Removed 1 ${what}`));
+      rereadKey(true);
+    } else {
       setView(null);
-      loadChildren(path);
+      setRead(null);
+      setEdit(null);
+      // the key leaves the list; a key that is also a prefix stays as one
+      setChildren((cs) =>
+        cs.flatMap((ch) => (ch.full !== key ? [ch] : ch.hasChildren ? [{ ...ch, isKey: false, type: undefined, error: undefined }] : [])),
+      );
+      setKeysStatus(succeeded(r, r.removed === 0 ? `${key} was already gone` : `Deleted ${key}`));
     }
+  };
+
+  const expireKey = async (raw: string) => {
+    if (!view) return;
+    const checked = checkTtl(raw);
+    if ('error' in checked) return setEdit({ ok: false, text: checked.error });
+    setEdit(running('Setting TTL…'));
+    // 0 goes to the server as typed: it refuses it, saying to use Delete
+    const r = await post('expire', { url, key: view.key, ttl: checked.ttl });
+    if (!r.ok) return setEdit(failed(r));
+    const text =
+      checked.ttl === -1
+        ? r.applied
+          ? 'Expiry removed'
+          : 'The key had no expiry'
+        : r.applied
+          ? `TTL set to ${checked.ttl} s`
+          : 'Key not found: no TTL set';
+    setEdit(succeeded(r, text));
+    rereadKey(true);
+  };
+
+  const addToKey = async (payload: Record<string, unknown>) => {
+    if (!view) return;
+    setEdit(running('Saving…'));
+    const r = await post('set', { url, key: view.key, type: view.type, ...payload });
+    if (!r.ok) return setEdit(failed(r));
+    setEdit(succeeded(r, 'Saved'));
+    rereadKey(true);
   };
 
   const publish = async () => {
+    if (pubStatus?.busy || !channel.trim()) return;
+    setPubStatus(running('Publishing…'));
     const r = await post('publish', { url, channel, message: pubMsg });
-    setStatus(r.ok ? `PUBLISH → ${r.receivers} receiver(s)` : `✗ ${r.error}`);
+    setPubStatus(r.ok ? succeeded(r, `Published · ${plural(r.receivers, 'receiver')}`) : failed(r));
   };
 
-  const toggleSubscribe = () => {
-    if (subscribed) {
-      esRef.current?.close();
-      esRef.current = null;
-      setSubscribed(false);
-      return;
-    }
+  const subscribing = subState === 'connecting' || subState === 'live';
+  const disconnect = () => {
+    esRef.current?.close();
+    esRef.current = null;
+    setSubState('idle');
+  };
+  const connect = () => {
     const chans = subChannels.trim();
-    if (!chans) return;
+    if (!chans || subscribing) return;
     const pattern = /[*?[]/.test(chans) ? '1' : '0';
+    setSubStatus(null);
+    setSubState('connecting');
     const es = new EventSource(
       `/api/redis/subscribe?url=${encodeURIComponent(url)}&channels=${encodeURIComponent(chans)}&pattern=${pattern}`,
     );
+    es.addEventListener('ready', () => setSubState('live'));
     es.addEventListener('message', (e) => {
       let d: any;
       try { d = JSON.parse((e as MessageEvent).data); } catch { return; } // drop malformed frame, keep stream
-      setFeed((f) => [{ ...d, id: feedIdRef.current++ }, ...f].slice(0, 200));
+      const row = { id: feedIdRef.current++, channel: String(d.channel ?? ''), message: String(d.message ?? ''), at: String(d.at ?? ''), note: d.note };
+      setFeed((f) => [row, ...f].slice(0, 200));
     });
-    // Native failures carry no data → EventSource would retry forever; stop & flag
-    // so the UI doesn't show a broken subscription as still "listening".
+    // The server's error event carries { error, detail, log }; a native failure carries no
+    // data, and EventSource would retry forever: stop and flag either way, so a broken
+    // subscription is not shown as still listening.
     es.addEventListener('error', (e) => {
-      setStatus(`sub error: ${(e as MessageEvent).data || 'connection lost'}`);
+      const data = (e as MessageEvent).data;
+      let r: any = null;
+      try { r = data ? JSON.parse(data) : null; } catch { r = { error: data }; }
+      setSubStatus(failed(r ?? { error: 'Connection to conduit lost' }));
       es.close();
       esRef.current = null;
-      setSubscribed(false);
+      setSubState('error');
     });
     esRef.current = es;
-    setSubscribed(true);
   };
 
   useEffect(() => () => esRef.current?.close(), []);
+
+  const fq = feedFilter.trim().toLowerCase();
+  const shownFeed = fq ? feed.filter((f) => f.channel.toLowerCase().includes(fq) || f.message.toLowerCase().includes(fq)) : feed;
+  const subText =
+    subState === 'live'
+      ? `Listening on ${subChannels.trim()}`
+      : subState === 'connecting'
+        ? 'Connecting…'
+        : subState === 'error'
+          ? 'Error'
+          : 'Not connected';
 
   const [scanSoon, setScanSoon] = useState(false);
   useEffect(() => {
@@ -326,13 +547,15 @@ export default function RedisPanel() {
   }, [scanSoon]);
   const exampleArm = useArmedConfirm();
   const isExampleConn = (ex: typeof EXAMPLES.redis) =>
-    (!host.trim() || host.trim() === ex.host) && (!port.trim() || port.trim() === ex.port) && !password && !db;
+    (!host.trim() || host.trim() === ex.host) && (!port.trim() || port.trim() === ex.port) && !password && !db && !username && !tlsOn;
   const applyExample = (ex: typeof EXAMPLES.redis) => {
     exampleArm.disarm();
     setHost(ex.host);
     setPort(ex.port);
+    setUsername('');
     setPassword('');
     setDb('');
+    setTls(false);
     setPath('');
     setRtab('value');
     setScanSoon(true);
@@ -346,6 +569,10 @@ export default function RedisPanel() {
     setRtab('value');
     flash(`Kept your connection to ${host}:${port}; the ${ex.host}:${ex.port} example was not applied.`);
   });
+
+  const shownChildren = children.filter((ch) =>
+    levelFilter ? ch.seg.toLowerCase().includes(levelFilter.toLowerCase()) : true,
+  );
 
   return (
     <div className="layout">
@@ -368,7 +595,7 @@ export default function RedisPanel() {
           <SaveAs
             canSave={() => (host.trim() ? null : 'Enter a host first')}
             onSave={(name) => {
-              persistConns([...conns.filter((c) => c.name !== name), { name, host, port, password, db }]);
+              persistConns([...conns.filter((c) => c.name !== name), { name, host, port, username, password, db, tls: tlsOn }]);
               setPickedConn(name);
               return `Saved "${name}"`;
             }}
@@ -388,42 +615,70 @@ export default function RedisPanel() {
         <Section title="Connection">
           <div className="conn-row mt-0">
             <div className="grow">
-              <label>Host</label>
+              <label htmlFor="redis-host">Host</label>
               <LongField
+                id="redis-host"
                 url
                 value={host}
                 spellCheck={false}
-                aria-label="Host"
-                placeholder="127.0.0.1 or redis://host:port"
+                placeholder="127.0.0.1 or rediss://host:port"
                 onChange={setHost}
               />
             </div>
             <div className="conn-sm">
-              <label>Port</label>
-              <input value={port} placeholder="6379" onChange={(e) => setPort(e.target.value)} />
+              <label htmlFor="redis-port">Port</label>
+              <input id="redis-port" value={port} placeholder="6379" onChange={(e) => setPort(e.target.value)} />
             </div>
           </div>
           <div className="conn-row">
             <div className="grow">
-              <label>Password</label>
+              <label htmlFor="redis-username">Username</label>
               <input
+                id="redis-username"
+                value={username}
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="optional"
+                onChange={(e) => setUsername(e.target.value)}
+              />
+            </div>
+            <div className="grow">
+              <label htmlFor="redis-password">Password</label>
+              <input
+                id="redis-password"
                 type="password"
                 value={password}
                 spellCheck={false}
-                placeholder="blank if none"
+                placeholder="optional"
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
             <div className="conn-sm">
-              <label>DB</label>
-              <input value={db} placeholder="0" onChange={(e) => setDb(e.target.value)} />
+              <label htmlFor="redis-db">DB</label>
+              <input id="redis-db" value={db} placeholder="0" onChange={(e) => setDb(e.target.value)} />
             </div>
-            <button className="btn-secondary" onClick={ping} title="Send PING to check the connection">
-              Ping
+            <button
+              className="btn-secondary"
+              disabled={!!pingStatus?.busy || !host.trim()}
+              onClick={ping}
+              title={host.trim() ? 'Send PING to check the connection' : 'Enter a host first'}
+            >
+              {pingStatus?.busy ? 'Pinging…' : 'Ping'}
             </button>
           </div>
-          <div className="hint mono break">{url.replace(/:\/\/:[^@]*@/, '://:***@')}</div>
-          {status && <div className={status.startsWith('✗') ? 'error break' : 'hint text-ok'}>{status.replace(/^✗ /, '')}</div>}
+          <div className="inline mt-2">
+            <label className="check" title={hostWantsTls(host) ? 'The Host is a rediss:// URL, so TLS is always on' : 'Connect over TLS (rediss://)'}>
+              <input
+                type="checkbox"
+                checked={tlsOn}
+                disabled={hostWantsTls(host)}
+                onChange={(e) => setTls(e.target.checked)}
+              />
+              TLS
+            </label>
+            <span className="hint m-0 mono break grow">{shownUrl(url)}</span>
+          </div>
+          <OutcomeView o={pingStatus} secrets={secrets} />
         </Section>
 
         <Section title="Keys" hint="An exact key opens its value; anything else is browsed as a prefix. Leave it empty to list the top level.">
@@ -437,10 +692,16 @@ export default function RedisPanel() {
               onChange={setPath}
               onEnter={() => go()}
             />
-            <button className="btn-primary" onClick={go} title="Open this exact key, or browse it as a prefix">
-              Scan
+            <button
+              className="btn-primary"
+              disabled={keysBusy || !host.trim()}
+              onClick={go}
+              title={host.trim() ? 'Open this exact key, or browse it as a prefix' : 'Enter a host first'}
+            >
+              {keysBusy ? 'Scanning…' : 'Scan'}
             </button>
           </div>
+          <OutcomeView o={keysStatus} secrets={secrets} />
 
           {children.length > 0 && (
             <>
@@ -477,7 +738,7 @@ export default function RedisPanel() {
             <Empty
               compact
               className="mt-3"
-              title="No keys listed yet"
+              title="No keys yet"
               hint={
                 <>
                   Press <kbd>Scan</kbd> with the box empty to list the top level, or type a prefix like <code>user:</code>.
@@ -485,42 +746,56 @@ export default function RedisPanel() {
               }
             />
           ) : (
+            // rows are role=button (not <button>) because a key that is also a prefix holds its own Open button
             <div className="keylist">
-              {children
-                .filter((ch) => (levelFilter ? ch.seg.toLowerCase().includes(levelFilter.toLowerCase()) : true))
-                .map((ch) => {
-                  const color = ch.isKey ? TYPE_COLORS[ch.type ?? ''] ?? 'var(--text-dim)' : 'var(--text-dim)';
-                  const badge = ch.isKey ? ch.type : 'dir';
-                  return (
-                    <div
-                      key={ch.full}
-                      className={`keyrow ${view?.key === ch.full ? 'keyrow-active' : ''}`}
-                      title={ch.hasChildren ? `Browse inside ${ch.full}` : `Open ${ch.full}`}
-                      onClick={() => (ch.hasChildren ? drill(ch.full) : openKey(ch.full))}
-                    >
-                      <span className="tbadge" style={{ background: `color-mix(in srgb, ${color} 18%, transparent)`, color }}>
-                        {badge}
-                      </span>
-                      <span className="kname" title={ch.full}>{ch.seg}</span>
-                      <span className="kcount">
-                        {ch.count}
-                        {ch.hasChildren ? ' ›' : ''}
-                      </span>
-                      {ch.isKey && ch.hasChildren && (
-                        <span
-                          className="open-mini"
-                          title={`Open the value of ${ch.full} instead of browsing into it`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openKey(ch.full);
-                          }}
-                        >
-                          open
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
+              <div className="keylist-head" aria-hidden>
+                <span>type · name</span>
+                <span title="How many keys share this name or prefix">keys</span>
+              </div>
+              {shownChildren.map((ch, i) => {
+                const color = ch.error ? 'var(--bad)' : ch.isKey ? TYPE_COLORS[ch.type ?? ''] ?? 'var(--text-dim)' : 'var(--text-dim)';
+                const badge = ch.isKey ? (ch.error ? 'error' : ch.type) : 'dir';
+                const activate = () => (ch.hasChildren ? drill(ch.full) : openKey(ch.full));
+                const title = ch.error
+                  ? `${ch.full}: ${ch.error}`
+                  : ch.hasChildren
+                    ? `Browse inside ${ch.full}`
+                    : `Open ${ch.full}`;
+                return (
+                  <div
+                    key={ch.full}
+                    role="button"
+                    tabIndex={rowTabIndex(i)}
+                    className={`keyrow ${view?.key === ch.full ? 'keyrow-active' : ''}`}
+                    title={title}
+                    onClick={activate}
+                    onKeyDown={rowKeyDown(activate)}
+                  >
+                    <span className="tbadge" style={{ background: `color-mix(in srgb, ${color} 18%, transparent)`, color }}>
+                      {badge}
+                    </span>
+                    <span className="kname">{ch.seg}</span>
+                    <span className="kcount" title={`${plural(ch.count, 'key')} under this name`}>
+                      {ch.count}
+                      {ch.hasChildren ? ' ›' : ''}
+                    </span>
+                    {ch.isKey && ch.hasChildren && (
+                      <button
+                        type="button"
+                        className="open-mini"
+                        title={`Open the value of ${ch.full} instead of browsing into it`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openKey(ch.full);
+                        }}
+                        onKeyDown={(e) => e.stopPropagation()}
+                      >
+                        Open
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </Section>
@@ -553,29 +828,27 @@ export default function RedisPanel() {
           {view ? (
             <KeyDetail
               view={view}
+              read={viewRead}
+              edit={editStatus}
+              latest={keyOutLatest}
+              secrets={secrets}
               fmtJsonOn={fmtJsonOn}
               onToggleFmt={() => setFmtJsonOn((v) => !v)}
               onDelKey={() => delKey()}
               onDelMember={(m) => delKey(m)}
-              onExpire={async (ttl) => {
-                await post('expire', { url, key: view.key, ttl });
-                refreshKey();
-              }}
-              onAdd={async (payload) => {
-                await post('set', { url, key: view.key, type: view.type, ...payload });
-                refreshKey();
-              }}
-              onRefresh={refreshKey}
+              onExpire={expireKey}
+              onAdd={addToKey}
+              onRefresh={() => rereadKey()}
               onLoadMore={loadMoreValue}
             />
           ) : (
             <Empty
               icon="⌗"
-              title="No key open"
+              title="No key open yet"
               hint={
                 <>
-                  Connect on the left (default <code>127.0.0.1:6379</code>), press <kbd>Scan</kbd>, then click a key to view,
-                  edit and expire its value.
+                  Connect on the left (now <code>{url.replace(/^rediss?:\/\/([^@]*@)?/, '').replace(/\/\d+$/, '')}</code>), press <kbd>Scan</kbd>, then
+                  click a key to view, edit and expire its value.
                 </>
               }
             >
@@ -585,32 +858,54 @@ export default function RedisPanel() {
                 onMouseLeave={exampleArm.disarm}
                 onBlur={exampleArm.disarm}
               >
-                {exampleArm.showsArmed('example') ? 'Click again to replace your connection' : 'Scan 127.0.0.1:6379'}
+                {exampleArm.showsArmed('example') ? 'Click again to replace your connection' : 'Try 127.0.0.1:6379'}
               </button>
             </Empty>
           )}
         </div>
 
         <div hidden={rtab !== 'commands'}>
-          <CommandsTab url={url} targetKey={commandsKey} hintType={view?.type} />
+          <CommandsTab url={url} secrets={secrets} targetKey={commandsKey} hintType={view?.type} />
         </div>
 
         <div hidden={rtab !== 'pubsub'}>
           <Section flush title="Publish" hint="Pub/Sub is independent of keys. Send a message to a channel, or listen below.">
-            <div className="row">
-              <input className="w-md" placeholder="channel" aria-label="Channel" value={channel} onChange={(e) => setChannel(e.target.value)} />
-              <LongField
-                className="grow"
-                placeholder='{"event":"ping"}'
-                aria-label="Message"
-                value={pubMsg}
-                spellCheck={false}
-                onChange={setPubMsg}
-              />
-              <button className="btn-secondary" onClick={publish} title="Publish this message to the channel">
-                Publish
+            <label htmlFor="redis-pub-channel" className="field-first">Channel</label>
+            <input
+              id="redis-pub-channel"
+              className="w-md"
+              placeholder="events"
+              value={channel}
+              spellCheck={false}
+              onChange={(e) => setChannel(e.target.value)}
+            />
+            <label htmlFor="redis-pub-message">Message</label>
+            <LongField
+              id="redis-pub-message"
+              placeholder='{"event":"ping"}'
+              value={pubMsg}
+              spellCheck={false}
+              onChange={setPubMsg}
+              onEnter={() => publish()}
+            />
+            <div className="inline mt-2">
+              <button
+                className="btn-primary"
+                disabled={!!pubStatus?.busy || !channel.trim()}
+                onClick={publish}
+                title="Publish this message to the channel"
+              >
+                {pubStatus?.busy ? 'Publishing…' : 'Publish'}
               </button>
+              {channel.trim() ? (
+                <span className="hint m-0">
+                  <kbd>Enter</kbd> in the message also publishes
+                </span>
+              ) : (
+                <span className="hint m-0">Enter a channel first.</span>
+              )}
             </div>
+            <OutcomeView o={pubStatus} secrets={secrets} />
           </Section>
 
           <Section
@@ -625,43 +920,82 @@ export default function RedisPanel() {
               <LongField
                 className="grow"
                 placeholder="channel1, channel2"
-                aria-label="Channels"
+                aria-label="Channels to subscribe to"
                 value={subChannels}
-                disabled={subscribed}
+                disabled={subscribing}
                 onChange={setSubChannels}
+                onEnter={() => connect()}
               />
               <button
-                className={subscribed ? 'btn-secondary btn-on' : 'btn-primary'}
-                onClick={toggleSubscribe}
-                title={subscribed ? 'Stop listening on these channels' : 'Start listening on these channels'}
+                className={subscribing ? 'btn-secondary btn-on' : 'btn-primary'}
+                disabled={!subscribing && !subChannels.trim()}
+                onClick={subscribing ? disconnect : connect}
+                title={subscribing ? 'Stop listening on these channels' : subChannels.trim() ? 'Start listening on these channels' : 'Enter a channel first'}
               >
-                {subscribed ? 'Stop' : 'Listen'}
+                {subscribing ? 'Disconnect' : 'Connect'}
               </button>
-              {subscribed && <span className="pill ok live">Listening</span>}
             </div>
+            <div className="inline mt-2">
+              <ConnPill state={subState} text={subText} />
+            </div>
+            <OutcomeView o={subStatus} secrets={secrets} />
             {feed.length > 0 ? (
               <>
                 <div className="feed-head">
-                  <span className="count">{feed.length} messages</span>
+                  <span className="count">{fq ? `${shownFeed.length} / ${feed.length}` : feed.length} messages</span>
+                  <input
+                    className="grow"
+                    placeholder="Filter messages"
+                    aria-label="Filter messages"
+                    value={feedFilter}
+                    spellCheck={false}
+                    onChange={(e) => setFeedFilter(e.target.value)}
+                  />
                   <span className="spacer" />
+                  <button
+                    className="btn-ghost btn-sm"
+                    onClick={() =>
+                      downloadJson(
+                        'redis',
+                        'feed',
+                        [...shownFeed].reverse().map(({ channel, message, at, note }) => ({ channel, message, at, ...(note ? { note } : {}) })),
+                      )
+                    }
+                    title="Save the messages shown (with the filter applied) as a JSON file, oldest first"
+                  >
+                    Export JSON
+                  </button>
                   <button className="btn-ghost btn-sm" onClick={() => setFeed([])} title="Discard the messages received so far">
                     Clear
                   </button>
                 </div>
                 <div className="feed">
-                  {feed.map((f) => (
-                    <FeedRow key={f.id} channel={f.channel} at={f.at} text={f.message} />
+                  {shownFeed.map((f) => (
+                    <FeedRow key={f.id} channel={f.channel} at={f.at} text={f.message} meta={f.note} pretty={!f.note} copy />
                   ))}
                 </div>
               </>
             ) : (
-              <Empty compact className="mt-3" title={subscribed ? 'Listening, nothing yet' : 'Not listening'} hint="Messages published to these channels will appear here, newest first." />
+              <Empty
+                compact
+                className="mt-3"
+                title={subState === 'live' ? 'No messages yet' : 'Not listening yet'}
+                hint={
+                  subState === 'live' ? (
+                    'Messages published to these channels appear here, newest first.'
+                  ) : (
+                    <>
+                      Enter channels and press <kbd>Connect</kbd>; messages appear here, newest first.
+                    </>
+                  )
+                }
+              />
             )}
           </Section>
         </div>
 
         <div hidden={rtab !== 'info'}>
-          <InfoTab url={url} />
+          <InfoTab url={url} secrets={secrets} />
         </div>
       </div>
     </div>
@@ -669,32 +1003,40 @@ export default function RedisPanel() {
 }
 
 // ── INFO dashboard + key export ──────────────────────────────────────────────
-function InfoTab({ url }: { url: string }) {
+function InfoTab({ url, secrets }: { url: string; secrets: string[] }) {
   const [sections, setSections] = useState<Record<string, Record<string, string>> | null>(null);
-  const [err, setErr] = useState('');
+  const [infoStatus, setInfoStatus] = useState<Outcome | null>(null);
+  const [exportStatus, setExportStatus] = useState<Outcome | null>(null);
+  // keys that could not be read in full, from the last export
+  const [exportFailed, setExportFailed] = useState<{ key: string; error: string }[]>([]);
   const [exportMatch, setExportMatch] = useState('*');
-  const [exporting, setExporting] = useState(false);
+  const loading = !!infoStatus?.busy;
+  const exporting = !!exportStatus?.busy;
 
   const refresh = async () => {
-    setErr('');
+    if (loading) return;
+    setInfoStatus(running('Loading…'));
     const r = await post('info', { url });
-    if (!r.ok) return setErr(r.error);
+    if (!r.ok) return setInfoStatus(failed(r));
     setSections(r.sections);
+    setInfoStatus(succeeded(r, 'Server stats loaded'));
   };
 
   const doExport = async () => {
-    setExporting(true);
-    setErr('');
+    if (exporting) return;
+    setExportStatus(running('Exporting…'));
+    setExportFailed([]);
     const r = await post('export', { url, match: exportMatch, limit: 2000 });
-    setExporting(false);
-    if (!r.ok) return setErr(r.error);
-    const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `redis-export-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    setErr(`exported ${r.count} keys${r.truncated ? ' (capped — narrow the pattern for more)' : ''}`);
+    if (!r.ok) return setExportStatus(failed(r));
+    downloadJson('redis', 'keys', r.data);
+    const bad: { key: string; error: string }[] = r.failed ?? [];
+    setExportFailed(bad);
+    setExportStatus(
+      succeeded(
+        r,
+        `Exported ${plural(r.count, 'key')}${bad.length ? `, ${bad.length} with errors (listed below and under "error" in the file)` : ''}${r.truncated ? ' (capped: narrow the pattern for more)' : ''}`,
+      ),
+    );
   };
 
   // the handful of stats that actually matter at a glance
@@ -714,13 +1056,22 @@ function InfoTab({ url }: { url: string }) {
   return (
     <div>
       <div className="inline mb-3">
-        <button className="btn-secondary" onClick={refresh} title="Read INFO from the connected instance">
-          Load server stats
+        <button className="btn-secondary" disabled={loading} onClick={refresh} title="Read INFO from the connected instance">
+          {loading ? 'Loading…' : 'Load server stats'}
         </button>
         <span className="hint m-0">Version, memory, clients and ops/sec from INFO.</span>
       </div>
+      <OutcomeView o={infoStatus} secrets={secrets} />
       {!sections && (
-        <Empty compact title="No server stats yet" hint="Press Load server stats to read them from the connected instance." />
+        <Empty
+          compact
+          title="No server stats yet"
+          hint={
+            <>
+              Press <kbd>Load server stats</kbd> to read them from the connected instance.
+            </>
+          }
+        />
       )}
 
       {sections && (
@@ -767,12 +1118,29 @@ function InfoTab({ url }: { url: string }) {
             onClick={doExport}
             title="Download matching keys and values as JSON"
           >
-            {exporting ? 'Exporting…' : 'Export'}
+            {exporting ? 'Exporting…' : 'Export JSON'}
           </button>
         </div>
+        <OutcomeView o={exportStatus} secrets={secrets} />
+        {exportFailed.length > 0 && (
+          <table className="rtable">
+            <thead>
+              <tr>
+                <th>key</th>
+                <th>error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {exportFailed.map((f) => (
+                <tr key={f.key}>
+                  <td className="mono break">{f.key}</td>
+                  <td className="break">{f.error}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </Section>
-
-      {err && <div className="hint mt-2">{err}</div>}
     </div>
   );
 }
@@ -782,10 +1150,12 @@ function InfoTab({ url }: { url: string }) {
 // batch runner + type-aware template chips. Run many at once.
 function CommandsTab({
   url,
+  secrets,
   targetKey,
   hintType,
 }: {
   url: string;
+  secrets: string[];
   targetKey: string;
   hintType?: RedisType;
 }) {
@@ -796,9 +1166,21 @@ function CommandsTab({
     if (targetKey) setKey(targetKey);
   }, [targetKey]);
   const [results, setResults] = useState<
-    { argv: string[]; ok: boolean; reply?: unknown; error?: string }[] | null
+    { argv: string[]; ok: boolean; reply?: unknown; error?: string; ms?: number }[] | null
   >(null);
-  const [busy, setBusy] = useState(false);
+  // the whole batch: its time and record, or why it could not run
+  const [batch, setBatch] = useState<Outcome | null>(null);
+  const busy = !!batch?.busy;
+  const [history, setHistory] = useState<HistoryItem[]>(loadHistory);
+  const [showHistory, setShowHistory] = useState(false);
+  const saveHistory = (next: HistoryItem[]) => {
+    setHistory(next);
+    try {
+      localStorage.setItem(LS_HISTORY, JSON.stringify(next));
+    } catch {
+      // full or blocked storage: history stays for this session only
+    }
+  };
 
   // template groups: the selected key's type first (if known), then the rest
   const order = [
@@ -818,26 +1200,60 @@ function CommandsTab({
       .filter((l) => l && !l.startsWith('#'))
       .map(tokenize)
       .filter((a) => a.length);
-    if (!argvs.length) return;
-    setBusy(true);
+    if (!argvs.length || busy) return;
+    setBatch(running('Running…'));
     const r = await post('cmd-batch', { url, argvs });
-    setResults(r.ok ? r.results : [{ argv: [], ok: false, error: r.error }]);
-    setBusy(false);
+    const at = new Date().toISOString();
+    if (r.ok) {
+      const res = r.results as NonNullable<typeof results>;
+      const bad = res.filter((x) => !x.ok).length;
+      setResults(res);
+      setBatch({
+        ...succeeded(
+          r,
+          bad ? `${res.length - bad} of ${plural(res.length, 'command')} ok, ${bad} failed` : `${plural(res.length, 'command')} ok`,
+        ),
+        warn: bad > 0,
+      });
+      saveHistory(
+        addHistory(
+          history,
+          res.map((x) => ({
+            at,
+            command: x.argv.join(' '),
+            ok: x.ok,
+            error: x.error,
+            ms: x.ms,
+          })),
+        ),
+      );
+    } else {
+      setResults(null);
+      setBatch(failed(r));
+      saveHistory(
+        addHistory(
+          history,
+          argvs.map((a) => ({ at, command: a.join(' '), ok: false, error: String(r.error ?? 'failed'), ms: r.durationMs })),
+        ),
+      );
+    }
   };
 
   const okCount = results?.filter((r) => r.ok).length ?? 0;
+  const replyText = (r: { ok: boolean; reply?: unknown; error?: string }) =>
+    r.ok ? (typeof r.reply === 'string' ? r.reply : JSON.stringify(r.reply, null, 2)) : `Error: ${r.error}`;
 
   return (
     <div>
       <div className="hint m-0 mb-2">
-        Run any Redis commands, one per line. Insert a template below, edit it, then press <b>Run all</b>.
+        Run any Redis commands, one per line. Insert a template below, edit it, then press <kbd>Run</kbd>.
       </div>
 
-      <label className="field-first">Target key</label>
+      <label className="field-first" htmlFor="redis-target-key">Target key</label>
       <LongField
+        id="redis-target-key"
         value={key}
         spellCheck={false}
-        aria-label="Target key"
         placeholder="myprefix:sub:key"
         onChange={setKey}
       />
@@ -863,12 +1279,12 @@ function CommandsTab({
         </div>
       ))}
 
-      <label>Commands</label>
+      <label htmlFor="redis-commands">Commands</label>
       <textarea
+        id="redis-commands"
         rows={10}
         value={script}
         spellCheck={false}
-        aria-label="Commands"
         placeholder={`TTL user:1\nHGETALL user:1\nSADD tags a b`}
         onChange={(e) => setScript(e.target.value)}
         onKeyDown={(e) => {
@@ -876,23 +1292,82 @@ function CommandsTab({
         }}
       />
       <div className="hint">
-        Quotes are respected, <code>#</code> starts a comment, <kbd>⌘↵</kbd> runs them all.
+        Quotes are respected and <code>#</code> starts a comment.
       </div>
       <div className="inline mt-2">
         <button className="btn-primary" disabled={busy || !script.trim()} onClick={runAll} title="Run every command line in order">
-          {busy ? 'Running…' : 'Run all'}
+          {busy ? 'Running…' : 'Run'}
         </button>
+        {script.trim() ? (
+          <span className="hint m-0">
+            <kbd>{MOD_KEY}</kbd> runs
+          </span>
+        ) : (
+          <span className="hint m-0">Enter a command first.</span>
+        )}
         <button
           className="btn-ghost"
           onClick={() => {
             setScript('');
             setResults(null);
+            setBatch(null);
           }}
           title="Empty the command box and drop the results"
         >
           Clear
         </button>
+        <span className="spacer" />
+        <button
+          className={`btn-ghost btn-sm ${showHistory ? 'btn-on' : ''}`}
+          aria-pressed={showHistory}
+          onClick={() => setShowHistory((v) => !v)}
+          title="Commands run before, newest first"
+        >
+          History ({history.length})
+        </button>
       </div>
+
+      {showHistory && (
+        <Section
+          title={
+            <>
+              History <span className="count">(last {HISTORY_MAX}, kept in this browser)</span>
+            </>
+          }
+          actions={
+            <button className="btn-ghost btn-sm" disabled={!history.length} onClick={() => saveHistory([])} title="Forget every command in the history">
+              Clear history
+            </button>
+          }
+        >
+          {history.length ? (
+            <div className="history">
+              {history.map((h, i) => (
+                <button
+                  type="button"
+                  key={`${h.at}-${i}`}
+                  className={`hist-item ${h.ok ? 'hist-ok' : 'hist-bad'}`}
+                  title="Add this command to the command box"
+                  onClick={() => setScript((s) => (s ? `${s.replace(/\n$/, '')}\n${h.command}` : h.command))}
+                >
+                  <div className="hist-head">
+                    <code className="break">{h.command}</code>
+                    <span>
+                      {h.ms != null && `${h.ms} ms · `}
+                      {new Date(h.at).toLocaleString()}
+                    </span>
+                  </div>
+                  {!h.ok && h.error && <div className="hist-body">Error: {h.error}</div>}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <Empty compact title="No history yet" hint="Commands you run appear here." />
+          )}
+        </Section>
+      )}
+
+      <OutcomeView o={batch} secrets={secrets} />
 
       {results ? (
         <Section
@@ -902,16 +1377,43 @@ function CommandsTab({
             </>
           }
           actions={
-            <button className="btn-ghost btn-sm" onClick={() => setResults(null)} title="Discard these replies">
-              Clear
-            </button>
+            <>
+              <CopyButton
+                label="Copy replies"
+                title="Copy every command and its reply as JSON"
+                text={() => JSON.stringify(results, null, 2)}
+              />
+              <button
+                className="btn-ghost btn-sm"
+                onClick={() => downloadJson('redis', 'replies', results)}
+                title="Save every command and its reply as a JSON file"
+              >
+                Export JSON
+              </button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={() => {
+                  setResults(null);
+                  setBatch(null);
+                }}
+                title="Discard these replies"
+              >
+                Clear
+              </button>
+            </>
           }
         >
           <div className="history">
             {results.map((r, i) => (
               <div key={i} className={`hist-item ${r.ok ? 'hist-ok' : 'hist-bad'}`}>
-                <div className="cmd-preview">{r.argv.join(' ')}</div>
-                <pre className="cell-json mt-1">{r.ok ? JSON.stringify(r.reply) : `ERROR: ${r.error}`}</pre>
+                <div className="hist-head">
+                  <code className="cmd-preview break">{r.argv.join(' ')}</code>
+                  <span>
+                    {r.ms != null && `${r.ms} ms`}
+                    <CopyButton label="Copy reply" title="Copy this reply" text={() => replyText(r)} />
+                  </span>
+                </div>
+                <pre className="cell-json mt-1">{r.ok ? JSON.stringify(r.reply) : `Error: ${r.error}`}</pre>
               </div>
             ))}
           </div>
@@ -920,10 +1422,10 @@ function CommandsTab({
         <Empty
           compact
           className="mt-4"
-          title="No commands run yet"
+          title="No replies yet"
           hint={
             <>
-              Insert a template above or type a line like <code>TTL user:1</code>, then press Run all.
+              Insert a template above or type a line like <code>TTL user:1</code>, then press <kbd>Run</kbd>.
             </>
           }
         />
@@ -946,14 +1448,30 @@ view: RedisKeyView;
 fmtJsonOn: boolean;
 onDelMember: (m: string) => void;
 }) {
+  const arm = useArmedConfirm();
+  const delX = (key: string, label: string, member: string) => (
+    <button
+      type="button"
+      className={`del-x ${arm.showsArmed(key) ? 'del-x-armed' : ''}`}
+      aria-label={label}
+      title={arm.showsArmed(key) ? 'Click again to remove' : label}
+      onClick={() => (arm.isArmed(key) ? (arm.disarm(), onDelMember(member)) : arm.arm(key))}
+      onMouseLeave={arm.disarm}
+      onBlur={arm.disarm}
+    >
+      {arm.showsArmed(key) ? 'Remove?' : '✕'}
+    </button>
+  );
   if (view.type === 'string') {
     const s = String(view.value ?? '');
     const pretty = fmtJsonOn ? tryJson(s) : null;
     return <pre>{pretty ?? s}</pre>;
   }
   if (view.type === 'hash' || view.type === 'zset') {
+    // rows are [field, value] for a hash and [member, score] for a zset: the first is the name
     const pairs = view.value as [string, string][];
     const isZ = view.type === 'zset';
+    const what = isZ ? 'this member' : 'this field';
     return (
       <table className="rtable">
         <thead>
@@ -964,20 +1482,48 @@ onDelMember: (m: string) => void;
           </tr>
         </thead>
         <tbody>
-          {pairs.map(([a, b], i) => (
+          {pairs.map(([name, v], i) => (
             <tr key={i}>
-              <td><Cell value={isZ ? b : a} fmtJsonOn={fmtJsonOn} /></td>
-              <td><Cell value={isZ ? a : b} fmtJsonOn={fmtJsonOn} /></td>
+              <td><Cell value={name} fmtJsonOn={fmtJsonOn} /></td>
+              <td><Cell value={v} fmtJsonOn={fmtJsonOn} /></td>
               <td>
-                <button
-                  type="button"
-                  className="del-x"
-                  aria-label={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
-                  title={`Remove ${isZ ? 'this member' : 'this field'} from ${view.key}`}
-                  onClick={() => onDelMember(isZ ? b : a)}
-                >
-                  ✕
-                </button>
+                {delX(`p${i}`, `Remove ${what} from ${view.key}`, name)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    );
+  }
+  if (view.type === 'stream') {
+    const entries = (view.value ?? []) as StreamEntry[];
+    return (
+      <table className="rtable">
+        <thead>
+          <tr>
+            <th>id</th>
+            <th>fields</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e) => (
+            <tr key={e.id}>
+              <td className="mono">{e.id}</td>
+              <td>
+                <table className="rtable kv-table">
+                  <tbody>
+                    {e.fields.map(([f, v], j) => (
+                      <tr key={j}>
+                        <td className="mono">{f}</td>
+                        <td><Cell value={v ?? ''} fmtJsonOn={fmtJsonOn} /></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </td>
+              <td>
+                {delX(`e${e.id}`, `Delete entry ${e.id} from ${view.key} (XDEL)`, e.id)}
               </td>
             </tr>
           ))}
@@ -993,15 +1539,7 @@ onDelMember: (m: string) => void;
           <tr key={i}>
             <td><Cell value={v} fmtJsonOn={fmtJsonOn} /></td>
             <td>
-              <button
-                type="button"
-                className="del-x"
-                aria-label={`Remove this element from ${view.key}`}
-                title={`Remove this element from ${view.key}`}
-                onClick={() => onDelMember(v)}
-              >
-                ✕
-              </button>
+              {delX(`a${i}`, `Remove this ${view.type === 'set' ? 'member' : 'element'} from ${view.key}`, v)}
             </td>
           </tr>
         ))}
@@ -1012,6 +1550,9 @@ onDelMember: (m: string) => void;
 
 function KeyDetail({
   view,
+  read,
+  edit,
+  secrets,
   fmtJsonOn,
   onToggleFmt,
   onDelKey,
@@ -1020,13 +1561,19 @@ function KeyDetail({
   onAdd,
   onRefresh,
   onLoadMore,
+  latest,
 }: {
   view: RedisKeyView;
+  read: Outcome | null;
+  edit: Outcome | null;
+  latest: 'read' | 'edit';
+  secrets: string[];
   fmtJsonOn: boolean;
   onToggleFmt: () => void;
   onDelKey: () => void;
   onDelMember: (m: string) => void;
-  onExpire: (ttl: number) => void;
+  /** the TTL as typed: checked before it is sent */
+  onExpire: (ttl: string) => void;
   onAdd: (payload: Record<string, unknown>) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
@@ -1037,17 +1584,15 @@ function KeyDetail({
   const delArmed = useArmedConfirm();
   const color = TYPE_COLORS[view.type] ?? 'var(--text-dim)';
   const delMember = useStableCallback(onDelMember);
+  const editBusy = !!edit?.busy;
 
-  const copyValue = () =>
-    navigator.clipboard.writeText(
-      typeof view.value === 'string' ? view.value : JSON.stringify(view.value, null, 2),
-    );
+  const copyValue = () => (typeof view.value === 'string' ? view.value : JSON.stringify(view.value, null, 2));
 
   const shown = Array.isArray(view.value) ? (view.value as unknown[]).length : 0;
   const count = Array.isArray(view.value)
     ? view.total != null && view.total > shown
-      ? ` · ${view.total} items (showing first ${shown})`
-      : ` · ${shown} items`
+      ? ` · ${plural(view.total, 'item')} (showing first ${shown})`
+      : ` · ${plural(shown, 'item')}`
     : '';
 
   return (
@@ -1057,7 +1602,7 @@ function KeyDetail({
         <span className="sep">·</span>
         <span>{view.key}</span>
         <span className="sep">·</span>
-        <span>TTL {view.ttl === -1 ? '∞' : view.ttl === -2 ? 'gone' : `${view.ttl}s`}</span>
+        <span>{view.ttl === -1 ? 'No expiry' : view.ttl === -2 ? 'Gone' : `TTL ${view.ttl} s`}</span>
         {count && (
           <>
             <span className="sep">·</span>
@@ -1065,16 +1610,24 @@ function KeyDetail({
           </>
         )}
       </div>
+      <OutcomeView o={latest === 'edit' && edit ? edit : read} secrets={secrets} />
       <div className="result-bar">
         <input
           className="w-md"
-          placeholder="TTL seconds, -1 = keep"
+          placeholder="TTL seconds"
+          title="Whole seconds, or -1 for no expiry"
           aria-label="New TTL in seconds"
+          inputMode="numeric"
           value={ttlInput}
           onChange={(e) => setTtlInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && ttlInput.trim() && onExpire(Number(ttlInput))}
+          onKeyDown={(e) => e.key === 'Enter' && ttlInput.trim() && !editBusy && onExpire(ttlInput)}
         />
-        <button className="btn-secondary btn-sm" disabled={!ttlInput.trim()} onClick={() => onExpire(Number(ttlInput))} title="Set this key's TTL">
+        <button
+          className="btn-secondary btn-sm"
+          disabled={!ttlInput.trim() || editBusy}
+          onClick={() => onExpire(ttlInput)}
+          title="Set this key's TTL in whole seconds; -1 removes the expiry"
+        >
           Set TTL
         </button>
         <span className="spacer" />
@@ -1086,13 +1639,12 @@ function KeyDetail({
         >
           Format JSON
         </button>
-        <button className="btn-ghost btn-sm" onClick={onRefresh} title="Read this key again">
-          Refresh
+        <button className="btn-ghost btn-sm" disabled={!!read?.busy} onClick={onRefresh} title="Read this key again">
+          {read?.busy ? 'Reading…' : 'Refresh'}
         </button>
-        <button className="btn-ghost btn-sm" onClick={copyValue} title="Copy the whole value">
-          Copy
-        </button>
+        <CopyButton label="Copy value" text={copyValue} title="Copy the whole value" />
         <button
+          disabled={editBusy}
           className={`btn-secondary btn-sm btn-danger ${delArmed.showsArmed('key') ? 'btn-on' : ''}`}
           onClick={() => (delArmed.isArmed('key') ? onDelKey() : delArmed.arm('key'))}
           onMouseLeave={delArmed.disarm}
@@ -1105,63 +1657,60 @@ function KeyDetail({
       <ValueRows view={view} fmtJsonOn={fmtJsonOn} onDelMember={delMember} />
       {view.nextCursor && (
         <div className="more-row">
-          <button className="btn-secondary btn-sm" onClick={onLoadMore} title="Append the next page of elements">
-            Load more (next ~500 of {view.total})
+          <button className="btn-secondary btn-sm" disabled={!!read?.busy} onClick={onLoadMore} title="Append the next page of elements">
+            {read?.busy ? 'Loading…' : `Load more (next ~500 of ${view.total})`}
           </button>
         </div>
       )}
-      <AddRow type={view.type} onAdd={onAdd} />
+      <AddRow type={view.type} busy={editBusy} onAdd={onAdd} />
     </div>
   );
 }
 
-function AddRow({ type, onAdd }: { type: RedisType; onAdd: (p: Record<string, unknown>) => void }) {
+function AddRow({ type, busy, onAdd }: { type: RedisType; busy: boolean; onAdd: (p: Record<string, unknown>) => void }) {
   const [a, setA] = useState('');
   const [b, setB] = useState('');
+  const btn = (label: string, title: string, payload: Record<string, unknown>) => (
+    <button className="btn-secondary" disabled={busy} onClick={() => onAdd(payload)} title={title}>
+      {label}
+    </button>
+  );
   if (type === 'string')
     return (
       <div className="row addrow">
-        <LongField className="grow" placeholder="new value" value={a} onChange={setA} />
-        <button className="btn-secondary" onClick={() => onAdd({ value: a })} title="Overwrite the string value">set</button>
+        <LongField className="grow" placeholder="New value" aria-label="New value" value={a} onChange={setA} />
+        {btn('SET', 'Overwrite the string value', { value: a })}
       </div>
     );
   if (type === 'hash')
     return (
       <div className="row addrow">
-        <input className="w-md" placeholder="field" value={a} onChange={(e) => setA(e.target.value)} />
-        <LongField className="grow" placeholder="value" value={b} onChange={setB} />
-        <button className="btn-secondary" onClick={() => onAdd({ field: a, value: b })} title="Set this field on the hash">
-          hset
-        </button>
+        <input className="w-md" placeholder="Field" aria-label="Field" value={a} onChange={(e) => setA(e.target.value)} />
+        <LongField className="grow" placeholder="Value" aria-label="Value" value={b} onChange={setB} />
+        {btn('HSET', 'Set this field on the hash', { field: a, value: b })}
       </div>
     );
   if (type === 'zset')
     return (
       <div className="row addrow">
-        <input className="w-sm" placeholder="score" value={a} onChange={(e) => setA(e.target.value)} />
-        <LongField className="grow" placeholder="member" value={b} onChange={setB} />
-        <button className="btn-secondary" onClick={() => onAdd({ score: a, member: b })} title="Add this member with the given score">
-          zadd
-        </button>
+        <input className="w-sm" placeholder="Score" aria-label="Score" value={a} onChange={(e) => setA(e.target.value)} />
+        <LongField className="grow" placeholder="Member" aria-label="Member" value={b} onChange={setB} />
+        {btn('ZADD', 'Add this member with the given score', { score: a, member: b })}
       </div>
     );
   if (type === 'set')
     return (
       <div className="row addrow">
-        <LongField className="grow" placeholder="member" value={a} onChange={setA} />
-        <button className="btn-secondary" onClick={() => onAdd({ member: a })} title="Add this member to the set">sadd</button>
+        <LongField className="grow" placeholder="Member" aria-label="Member" value={a} onChange={setA} />
+        {btn('SADD', 'Add this member to the set', { member: a })}
       </div>
     );
   if (type === 'list')
     return (
       <div className="row addrow">
-        <LongField className="grow" placeholder="value" value={a} onChange={setA} />
-        <button className="btn-secondary" onClick={() => onAdd({ value: a, left: false })} title="Append to the tail of the list">
-          rpush
-        </button>
-        <button className="btn-secondary" onClick={() => onAdd({ value: a, left: true })} title="Prepend to the head of the list">
-          lpush
-        </button>
+        <LongField className="grow" placeholder="Value" aria-label="Value" value={a} onChange={setA} />
+        {btn('RPUSH', 'Append to the tail of the list', { value: a, left: false })}
+        {btn('LPUSH', 'Prepend to the head of the list', { value: a, left: true })}
       </div>
     );
   return null;

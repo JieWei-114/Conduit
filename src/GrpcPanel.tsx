@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { SaveAs } from './SaveAs';
+import { AttemptLogBar, CopyButton, OutcomeView, type Outcome } from './AttemptLog';
 import AuthBox, { AUTH_DEFAULTS, authHeader, type AuthState } from './AuthBox';
 import { rowKeyDown, rowTabIndex } from './rowNav';
 import { RequestVarsBox } from './RequestVarsBox';
@@ -27,6 +28,7 @@ import type {
   RpcDef,
 } from './types';
 import { joinUrl } from './url';
+import { fmtBytes, isSensitiveHeader, maskHeaderValue, maskUrl, shellQuote } from './share';
 
 const LS_FORM = 'grpcwebtester.form.v3';
 const LS_HISTORY = 'grpcwebtester.history.v1';
@@ -36,6 +38,7 @@ const LS_PINS = 'conduit.grpc.pins.v1';
 const LS_TABS = 'conduit.grpc.tabs.v1';
 const LS_PREFIXES = 'conduit.grpc.prefixes.v1';
 const LS_TARGETS = 'conduit.grpc.targets.v1';
+const LS_REFL = 'conduit.grpc.reflect.v1';
 const HISTORY_MAX = 30;
 
 // gRPC status code → canonical name (grpc.io status codes)
@@ -61,12 +64,6 @@ interface FormState {
   body: string;
   /** gateway = gRPC-Web through the gateway; direct = native gRPC to host:port */
   transport: 'gateway' | 'direct';
-  /**
-   * Where the Service/Method list comes from. A gateway needs a descriptor to
-   * encode gRPC-Web, so it is always 'proto'; a direct target can ask the
-   * server itself. Held in state rather than inferred from whether reflection
-   * has returned yet, so the panel changes the moment the transport does.
-   */
   methodSource: 'proto' | 'reflection';
   targetHost: string;
   targetPort: string;
@@ -127,6 +124,26 @@ function headersOf(f: FormState): Record<string, string> {
   return headers;
 }
 
+/** The key that sends from a multi-line field, as this OS spells it. */
+const SEND_KEY = typeof navigator !== 'undefined' && navigator.platform.includes('Mac') ? '⌘↵' : 'Ctrl↵';
+
+/**
+ * The JSON Conduit's own server answered. Anything else (a crash page, a proxy) is named as an
+ * error instead of failing to parse.
+ */
+async function readJson(r: Response): Promise<any> {
+  const raw = await r.text();
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const head = raw.trim().slice(0, 300);
+    return {
+      ok: false,
+      error: `Conduit's server answered HTTP ${r.status}${r.statusText ? ` ${r.statusText}` : ''} with a body that is not JSON${head ? `:\n${head}` : ' (empty)'}`,
+    };
+  }
+}
+
 /** direct target as host:port — tolerates a pasted host:port in the Host field */
 function buildTarget(host: string, port: string): string {
   let h = host.trim();
@@ -139,11 +156,10 @@ function buildTarget(host: string, port: string): string {
   return `${h}:${p}`;
 }
 
-// one-click templates for common request headers — edit values after inserting.
 const QUICK_HEADERS: Record<string, string> = {
-  'platform-id': 'platform-id: ',
-  'x-env-tag': 'x-env-tag: ',
+  authorization: 'authorization: Bearer ',
   'x-request-id': 'x-request-id: ',
+  'x-tenant-id': 'x-tenant-id: ',
   'accept-language': 'accept-language: en-US',
   'user-agent': 'user-agent: conduit',
   'x-api-key': 'x-api-key: ',
@@ -202,6 +218,40 @@ interface ReqTab {
   form: FormState;
 }
 
+interface ReflMethod {
+  name: string;
+  path: string;
+  requestType: string;
+  responseType: string;
+  requestStream: boolean;
+  responseStream: boolean;
+  template: string;
+}
+interface ReflSvc {
+  service: string;
+  methods: ReflMethod[];
+  error?: string;
+}
+interface ReflCache {
+  services: ReflSvc[];
+  target: string;
+  at: string;
+  stale?: boolean;
+}
+
+function loadRefl(): Record<number, ReflCache> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS_REFL) ?? '{}');
+    if (!raw || typeof raw !== 'object') return {};
+    const out: Record<number, ReflCache> = {};
+    for (const [k, v] of Object.entries(raw as Record<string, ReflCache>))
+      if (v && Array.isArray(v.services)) out[Number(k)] = { ...v, stale: true };
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 function loadTabs(): { tabs: ReqTab[]; activeId: number } {
   try {
     const raw = JSON.parse(localStorage.getItem(LS_TABS) ?? 'null');
@@ -236,9 +286,6 @@ export default function GrpcPanel() {
   const initRef = useRef<{ tabs: ReqTab[]; activeId: number } | null>(null);
   if (!initRef.current) {
     const loaded = loadTabs();
-    // one-time migration: earlier versions had dedicated platform-id / x-env-tag
-    // fields; when they were folded into Extra headers the stored VALUES were
-    // dropped, silently un-sending those headers. Carry them over once.
     const MIGR = 'conduit.grpc.hdrmigr.v1';
     if (!localStorage.getItem(MIGR)) {
       try {
@@ -298,6 +345,8 @@ export default function GrpcPanel() {
 
   const [protos, setProtos] = useState<string[]>([]);
   const [rootError, setRootError] = useState('');
+  /** why the selected .proto could not be read, so Send can say why it is disabled */
+  const [inspectErr, setInspectErr] = useState('');
   const [filter, setFilter] = useState('');
   const [info, setInfo] = useState<ProtoInfo | null>(null);
   const [histEntries, setHistEntries] = useState<HistoryEntry[]>(() =>
@@ -326,21 +375,20 @@ export default function GrpcPanel() {
   const [showHeaders, setShowHeaders] = useState(false);
   const [pins, setPins] = useState<HistoryEntry[]>(() => loadList<HistoryEntry>(LS_PINS));
 
-  // ── reflection (direct transport only): pull services/methods from the server
-  //    so you don't need a local .proto. Separate from the protoc pipeline.
-  interface ReflMethod {
-    name: string;
-    path: string;
-    requestType: string;
-    responseType: string;
-    requestStream: boolean;
-    responseStream: boolean;
-    template: string;
-  }
-  interface ReflSvc { service: string; methods: ReflMethod[]; error?: string }
-  const [reflSvcs, setReflSvcs] = useState<ReflSvc[] | null>(null);
+  const [reflMap, setReflMap] = useState<Record<number, ReflCache>>(loadRefl);
+  const reflEntry = reflMap[active.id];
+  const reflSvcs = reflEntry?.services ?? null;
+  const setReflFor = (tid: number, entry: ReflCache | null) =>
+    setReflMap((m) => {
+      const c = { ...m };
+      if (entry) c[tid] = entry;
+      else delete c[tid];
+      return c;
+    });
+  const setReflSvcs = (v: null) => setReflFor(active.id, v);
   const [reflBusy, setReflBusy] = useState(false);
-  const [reflErr, setReflErr] = useState('');
+  /** why listing failed, with the attempt's detail and record when the call went out */
+  const [reflErr, setReflErr] = useState<Outcome | null>(null);
   const [reflSvcSel, setReflSvcSel] = useState('');
   const [reflMethodSel, setReflMethodSel] = useState('');
   const [reflSvcFilter, setReflSvcFilter] = useState('');
@@ -349,21 +397,28 @@ export default function GrpcPanel() {
   const useProtoInstead = () => {
     set('methodSource', 'proto');
     setReflSvcs(null);
-    setReflErr('');
+    setReflErr(null);
     setReflSvcSel('');
     setReflMethodSel('');
   };
 
   const clearReflect = () => {
     setReflSvcs(null);
-    setReflErr('');
+    setReflErr(null);
     setReflSvcSel('');
     setReflMethodSel('');
   };
 
   // per-method body memory: bodies keyed by "proto|Service/Method"
   const bodies = useRef<Record<string, string>>(
-    JSON.parse(localStorage.getItem(LS_BODIES) ?? '{}'),
+    (() => {
+      // a corrupt or foreign value must not stop the panel from opening
+      try {
+        return JSON.parse(localStorage.getItem(LS_BODIES) ?? '{}');
+      } catch {
+        return {};
+      }
+    })(),
   );
   const firstBodyRun = useRef(true);
   const prevActiveId = useRef(activeId);
@@ -379,8 +434,21 @@ export default function GrpcPanel() {
 
   const addTab = () => {
     const id = Math.max(...reqTabs.map((t) => t.id)) + 1;
-    // clone the current tab — same env/root/token, likely a different method next
-    setReqTabs((ts) => [...ts, { id, form: { ...active.form } }]);
+    const f = active.form;
+    const conn: Partial<FormState> = {
+      root: f.root,
+      proto: f.proto,
+      base: f.base,
+      prefix: f.prefix,
+      transport: f.transport,
+      methodSource: f.methodSource,
+      targetHost: f.targetHost,
+      targetPort: f.targetPort,
+      plaintext: f.plaintext,
+      rpcProtocol: f.rpcProtocol,
+    };
+    setReqTabs((ts) => [...ts, { id, form: { ...DEFAULTS, ...conn } }]);
+    if (reflEntry) setReflFor(id, reflEntry);
     setActiveId(id);
   };
 
@@ -399,6 +467,7 @@ export default function GrpcPanel() {
       delete c[id];
       return c;
     });
+    setReflFor(id, null);
     if (id === activeId) setActiveId(next[Math.max(0, idx - 1)].id);
   };
 
@@ -409,8 +478,12 @@ export default function GrpcPanel() {
   useEffect(() => {
     if (form.root) return;
     fetch('/api/grpc/config')
-      .then((r) => r.json())
-      .then((d) => set('root', d.defaultRoot));
+      .then(readJson)
+      .then((d) => {
+        if (d.defaultRoot) set('root', d.defaultRoot);
+        else if (d.error) setRootError(`Could not read the default proto folder: ${d.error}`);
+      })
+      .catch((e) => setRootError(`Could not read the default proto folder: ${e?.message ?? e}`));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -419,7 +492,7 @@ export default function GrpcPanel() {
     if (!form.root) return;
     const t = setTimeout(() => {
       fetch(`/api/grpc/protos?root=${encodeURIComponent(form.root)}`)
-        .then((r) => r.json())
+        .then(readJson)
         .then((d) => {
           if (d.error) {
             setRootError(d.error);
@@ -427,10 +500,10 @@ export default function GrpcPanel() {
             return;
           }
           setRootError('');
-          setProtos(d.protos);
+          setProtos(d.protos ?? []);
           if (!d.protos.includes(form.proto)) set('proto', d.protos[0] ?? '');
         })
-        .catch((e) => setRootError(String(e)));
+        .catch((e) => setRootError(String(e?.message ?? e)));
     }, 400);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -440,18 +513,20 @@ export default function GrpcPanel() {
   useEffect(() => {
     if (!form.proto || !form.root) return;
     setInfo(null);
+    setInspectErr('');
     fetch(
       `/api/grpc/inspect?root=${encodeURIComponent(form.root)}&proto=${encodeURIComponent(form.proto)}`,
     )
-      .then((r) => r.json())
+      .then(readJson)
       .then((d: ProtoInfo & { error?: string }) => {
-        if (d.error) return;
+        if (d.error) return setInspectErr(d.error);
         setInfo(d);
         const all = d.services.flatMap((s) =>
           s.rpcs.map((r) => `${s.service}/${r.method}`),
         );
         if (!all.includes(form.rpc)) set('rpc', all[0] ?? '');
-      });
+      })
+      .catch((e) => setInspectErr(String(e?.message ?? e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.proto, form.root]);
 
@@ -469,9 +544,6 @@ export default function GrpcPanel() {
     persistLater(LS_TABS, () => JSON.stringify({ tabs: slim, activeId }));
   }, [reqTabs, activeId]);
 
-  // #4 per-method body: on method/proto switch, swap in that method's saved body.
-  // Skipped on: first render (keep a restored/shared body), tab switches (each
-  // tab owns its body), and history restores (keep the historical body).
   useEffect(() => {
     if (firstBodyRun.current) {
       firstBodyRun.current = false;
@@ -486,9 +558,38 @@ export default function GrpcPanel() {
       skipBodySwap.current = false;
       return;
     }
-    set('body', bodies.current[bodyKey] ?? '');
+    const kept = bodies.current[bodyKey];
+    set('body', kept?.trim() ? kept : current ? templateFor(current.req, 0).join('\n') : '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.proto, form.rpc, activeId]);
+
+  useEffect(() => {
+    persistLater(LS_REFL, () =>
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(reflMap)
+            .filter(([id]) => reqTabs.some((t) => String(t.id) === id))
+            .map(([id, v]) => [id, { services: v.services, target: v.target, at: v.at }]),
+        ),
+      ),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reflMap]);
+
+  useEffect(() => {
+    const svcs = reflMap[activeId]?.services;
+    if (!svcs) return;
+    const [svc, method] = form.rpc.split('/');
+    const hit = svcs.find((x) => x.service === svc);
+    if (hit) {
+      setReflSvcSel(svc);
+      setReflMethodSel(hit.methods.some((m) => m.name === method) ? method : '');
+    } else {
+      setReflSvcSel(svcs.find((x) => x.methods.length)?.service ?? '');
+      setReflMethodSel('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
 
   // persist the current body under its method key as it's edited
   useEffect(() => {
@@ -532,13 +633,6 @@ export default function GrpcPanel() {
   // enum options for a field type (null if not an enum) — shown as a filling hint
   const enumValues = (type: string): string[] | null =>
     info?.enums.find((e) => e.name === short(type))?.values ?? null;
-
-  const copyResponse = async () => {
-    if (result?.ok) {
-      await navigator.clipboard.writeText(result.decoded);
-      flash('Response copied');
-    }
-  };
 
   // #9 pinned requests (survive the 30-entry history cap)
   const pinKey = (e: HistoryEntry) => `${e.proto}|${e.rpc}|${e.url}|${e.body}`;
@@ -651,45 +745,47 @@ export default function GrpcPanel() {
     );
   };
 
-  const copyCurl = async () => {
-    if (!current) return;
-    if (form.transport === 'direct') {
-      flash('cURL export is gateway-mode only');
-      return;
-    }
+  /** A shell script that makes this gateway call with protoc and curl; `{{variables}}` are left as written. */
+  const curlScript = (reveal = false) => {
+    if (!current) return '';
     const dir = form.proto.split('/').slice(0, -1).join('/');
-    const hdrs = Object.entries(buildHeaders())
-      .filter(([, v]) => v)
-      .map(([k, v]) => `  -H '${k}: ${v.replace(/'/g, `'\\''`)}' \\`)
+    // every header line ends in `\`, and none is blank: an empty line would end the command there
+    const hdrs = [
+      ['content-type', 'application/grpc-web+proto'],
+      ['x-grpc-web', '1'],
+      ...Object.entries(buildHeaders()).filter(
+        ([k, v]) => v && !['content-type', 'x-grpc-web'].includes(k.toLowerCase()),
+      ),
+    ]
+      .map(([k, v]) => `  -H ${shellQuote(`${k}: ${reveal ? v : maskHeaderValue(k, v)}`)} \\`)
       .join('\n');
-    const bodyEsc = form.body.replace(/'/g, `'\\''`);
     const script = `# ${form.rpc} — generated by conduit
-cd '${form.root}' && \\
-printf '%s' '${bodyEsc}' | protoc -I . -I '${dir}' --encode=${fq(current.req)} '${form.proto}' > /tmp/req.bin && \\
+cd ${shellQuote(form.root)} && \\
+printf '%s' ${shellQuote(form.body)} | protoc -I . -I ${shellQuote(dir)} --encode=${fq(current.req)} ${shellQuote(form.proto)} > /tmp/req.bin && \\
 python3 -c "import struct;p=open('/tmp/req.bin','rb').read();open('/tmp/frame.bin','wb').write(b'\\x00'+struct.pack('>I',len(p))+p)" && \\
-curl -s '${url}' \\
-  -H 'content-type: application/grpc-web+proto' \\
-  -H 'x-grpc-web: 1' \\
+curl -s ${shellQuote(reveal ? url : maskUrl(url))} \\
 ${hdrs}
   --data-binary @/tmp/frame.bin -o /tmp/res.bin && \\
 python3 -c "import struct;d=open('/tmp/res.bin','rb').read();open('/tmp/p.bin','wb').write(d[5:5+struct.unpack('>I',d[1:5])[0]])" && \\
-protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin`;
-    await navigator.clipboard.writeText(script);
-    flash(
-      usesVars(Object.values(templatesOf(form, url)), form.vars)
-        ? 'cURL script copied — {{variables}} are left as written'
-        : 'cURL script copied',
-    );
+protoc -I . -I ${shellQuote(dir)} --decode=${fq(current.res)} ${shellQuote(form.proto)} < /tmp/p.bin`;
+    return script;
   };
 
-  const copyShareLink = async () => {
-    // strip ALL credentials from the share payload: auth and secret variable values
-    const { auth: _omit, ...rest } = { ...form, vars: { ...form.vars, vars: withoutSecretValues(form.vars.vars) } };
+  const shareLink = () => {
+    const { auth: _omit, ...rest } = {
+      ...form,
+      extraHeaders: form.extraHeaders
+        .split('\n')
+        .filter((line) => {
+          const i = line.indexOf(':');
+          return !(i > 0 && isSensitiveHeader(line.slice(0, i).trim()));
+        })
+        .join('\n'),
+      urlOverride: maskUrl(form.urlOverride),
+      vars: { ...form.vars, vars: withoutSecretValues(form.vars.vars) },
+    };
     const payload = btoa(unescape(encodeURIComponent(JSON.stringify(rest))));
-    await navigator.clipboard.writeText(
-      `${location.origin}${location.pathname}#s=${payload}`,
-    );
-    flash('Share link copied (auth excluded)');
+    return `${location.origin}${location.pathname}#s=${payload}`;
   };
 
   // ---------------------------------------------------------- saved bases --
@@ -815,6 +911,15 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
     };
   };
 
+  const aborts = useRef<Record<number, AbortController>>({});
+  const cancelled = (tid: number, ctl: AbortController) => {
+    if (aborts.current[tid] === ctl) delete aborts.current[tid];
+    if (!ctl.signal.aborted) return false;
+    setResultFor(tid, { ok: false, stage: 'call', error: 'Cancelled: the response was not waited for.' });
+    setBusyMap((m) => ({ ...m, [tid]: false }));
+    return true;
+  };
+
   const send = async () => {
     if (!current || !info || busyMap[active.id]) return; // no-op while in flight
     const tid = active.id; // pin the originating tab — user may switch mid-flight
@@ -846,16 +951,20 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
       grpcPath: `/${info!.pkg}.${current.service}/${current.method}`,
     };
     let res: CallResult;
+    const ctl = new AbortController();
+    aborts.current[tid] = ctl;
     try {
       const r = await fetch('/api/grpc/call', {
         method: 'POST',
+        signal: ctl.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(req),
       });
-      res = (await r.json()) as CallResult;
+      res = (await readJson(r)) as CallResult;
     } catch (e) {
       res = { ok: false, stage: 'network', error: String(e) };
     }
+    if (cancelled(tid, ctl)) return;
     setResultFor(tid, res);
     extractAfter(sentForm, res, sentEnv, false);
     pushHistory({
@@ -880,14 +989,14 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
   // ── reflection: list services/methods off the live server (direct mode) ──────
   const runReflect = async (override?: { target: string; plaintext: boolean; pick?: [string, string, string]; tabId?: number }) => {
+    const reflTab = override?.tabId ?? active.id;
     setReflBusy(true);
-    setReflErr('');
-    setReflSvcs(null);
+    setReflErr(null);
     let target: string;
     try {
       target = override ? override.target : (await directTarget()).target;
     } catch (e: any) {
-      setReflErr(`variables: ${e?.message ?? e}`);
+      setReflErr({ ok: false, text: `variables: ${e?.message ?? e}` });
       setReflBusy(false);
       return;
     }
@@ -899,11 +1008,13 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           target,
           plaintext: override ? override.plaintext : form.plaintext,
         }),
-      }).then((x) => x.json());
+      }).then(readJson);
       if (!r.ok) {
-        setReflErr(r.error || 'reflection failed');
+        // the record is kept: it says what was asked of which target, and what came back
+        setReflErr({ ok: false, text: r.error || 'reflection failed', ms: r.durationMs, detail: r.detail, log: r.log });
+        setReflFor(reflTab, null);
       } else {
-        setReflSvcs(r.services);
+        setReflFor(reflTab, { services: r.services, target, at: new Date().toISOString() });
         const [pSvc, pMethod, pBody] = override?.pick ?? [];
         const picked = r.services.find((s: ReflSvc) => s.service === pSvc && s.methods.some((m) => m.name === pMethod));
         const first = picked ?? r.services.find((s: ReflSvc) => s.methods.length);
@@ -919,8 +1030,8 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           }
         }
       }
-    } catch (e) {
-      setReflErr(String(e));
+    } catch (e: any) {
+      setReflErr({ ok: false, text: String(e?.message ?? e) });
     }
     setReflBusy(false);
   };
@@ -930,10 +1041,11 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
     setReflSvcSel(svc);
     setReflMethodSel(methodName);
     const m = reflSvcs?.find((s) => s.service === svc)?.methods.find((x) => x.name === methodName);
-    if (m) {
-      set('body', m.template);
-      set('rpc', `${svc}/${methodName}`);
-    }
+    if (!m) return;
+    const rpc = `${svc}/${methodName}`;
+    if (rpc !== form.rpc) skipBodySwap.current = true;
+    const kept = bodies.current[`${form.proto}|${rpc}`];
+    setActiveForm((f) => ({ ...f, rpc, body: kept?.trim() ? kept : m.template }));
   };
 
   const sendReflect = async () => {
@@ -954,7 +1066,24 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
       return;
     }
     setSecretsMap((mm) => ({ ...mm, [tid]: filled.secrets }));
+    const record = (res: CallResult) =>
+      pushHistory({
+        at: new Date().toISOString(),
+        rpc: `${reflSvcSel}/${reflMethodSel}`,
+        // as written, {{templates}} included: history never holds a filled-in secret
+        url: `grpc://${buildTarget(sentForm.targetHost, sentForm.targetPort)}`,
+        body: sentForm.body,
+        proto: sentForm.proto,
+        root: sentForm.root,
+        ok: res.ok && res.grpcStatus === '0',
+        grpcStatus: res.ok ? res.grpcStatus : `ERR:${res.stage}`,
+        httpStatus: res.httpStatus,
+        durationMs: res.durationMs,
+        response: snapResponse(res, filled.secrets),
+      });
     let res: CallResult;
+    const ctl = new AbortController();
+    aborts.current[tid] = ctl;
     if (sentForm.rpcProtocol === 'connect') {
       try {
         const scheme = sentForm.plaintext ? 'http' : 'https';
@@ -965,18 +1094,22 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           body: filled.form.body,
           headers: headersOf(filled.form),
           timeoutMs: Number(timeout) || 15000,
+          signal: ctl.signal,
         });
       } catch (e) {
         res = { ok: false, stage: 'network', error: String(e) };
       }
+      if (cancelled(tid, ctl)) return;
       setResultFor(tid, res);
       extractAfter(sentForm, res, sentEnv, true);
+      record(res);
       setBusyMap((mm) => ({ ...mm, [tid]: false }));
       return;
     }
     try {
       const r = await fetch('/api/grpc/reflect/call', {
         method: 'POST',
+        signal: ctl.signal,
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           target: buildTarget(filled.form.targetHost, filled.form.targetPort),
@@ -988,41 +1121,29 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
           timeoutMs: Number(timeout) || 15000,
         }),
       });
-      res = (await r.json()) as CallResult;
+      res = (await readJson(r)) as CallResult;
     } catch (e) {
       res = { ok: false, stage: 'network', error: String(e) };
     }
+    if (cancelled(tid, ctl)) return;
     setResultFor(tid, res);
     extractAfter(sentForm, res, sentEnv, true);
+    record(res);
     setBusyMap((mm) => ({ ...mm, [tid]: false }));
   };
 
   // ------------------------------------------------------------------- UI --
 
-  /**
-   * Which Service/Method picker is showing.
-   *
-   * A gateway has to encode gRPC-Web from a descriptor, so it is always the
-   * .proto pipeline. A direct target asks the server by default, and can fall
-   * back to .proto for servers with reflection turned off.
-   *
-   * Held in the form so the panel answers the transport choice immediately,
-   * without waiting on a network round trip to decide what to show.
-   */
   const source: 'proto' | 'reflection' =
     form.transport === 'gateway' ? 'proto' : form.methodSource;
   const reflecting = source === 'reflection';
+  const reflStale =
+    !!reflEntry && (reflEntry.stale || reflEntry.target !== buildTarget(form.targetHost, form.targetPort));
 
-  /* The reflected method in hand, so the one Invoke button below can answer for
-     both pickers: which call to make, whether it is callable, and what to say
-     when it is not. Without this the button can only see `current`, which the
-     .proto pipeline fills and reflection never does. */
   const reflSvc = reflSvcs?.find((s) => s.service === reflSvcSel);
   const reflMethod = reflecting
     ? reflSvc?.methods.find((m) => m.name === reflMethodSel) ?? null
     : null;
-  /* Why the reflected method cannot be called from here, or '' when it can. Server
-     streaming works over gRPC; sending a stream does not fit a single request body. */
   const unsupported = !reflMethod
     ? ''
     : reflMethod.requestStream
@@ -1031,17 +1152,11 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
         ? 'server streaming needs gRPC, not Connect'
         : '';
   const canInvoke = reflecting ? !!reflMethod && !unsupported : !!current;
-  /* The one gate for both the button and Cmd/Ctrl+Enter, so the keyboard path
-     cannot fire a call the button refuses. */
   const invoke = () => {
     if (busy || !canInvoke) return;
     return reflecting ? sendReflect() : send();
   };
 
-  /* Filtering matches the .proto picker: the same two boxes, the same n/total
-     counts. The selected entry is always kept in its list, so narrowing the
-     filter can never leave the select showing something other than what is
-     actually selected. */
   const svcMatches = (reflSvcs ?? []).filter(
     (s) => s.service === reflSvcSel ||
       s.service.toLowerCase().includes(reflSvcFilter.trim().toLowerCase()),
@@ -1091,7 +1206,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
         onSelect={setActiveId}
         onClose={closeTab}
         onAdd={addTab}
-        addTitle="New request tab (copies this one)"
+        addTitle="New tab with the same connection"
       />
 
       <div className="layout">
@@ -1157,6 +1272,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                     <label>Host</label>
                     <LongField
                       value={form.targetHost}
+                      aria-label="Host"
                       spellCheck={false}
                       placeholder="localhost"
                       onChange={(v) => set('targetHost', v)}
@@ -1164,7 +1280,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                   </div>
                   <div className="conn-sm">
                     <label>Port</label>
-                    <input value={form.targetPort} placeholder="50051" onChange={(e) => set('targetPort', e.target.value)} />
+                    <input value={form.targetPort} aria-label="Port" placeholder="50051" onChange={(e) => set('targetPort', e.target.value)} />
                   </div>
                   <label className="check" title="Plaintext means no TLS. Untick it for public TLS endpoints.">
                     <input type="checkbox" checked={form.plaintext} onChange={(e) => set('plaintext', e.target.checked)} />
@@ -1174,6 +1290,26 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                 <div className="hint">
                   A local service or a kubectl port-forward. Plaintext means no TLS; untick it for public TLS endpoints.
                 </div>
+                {reflecting && (
+                  <div className="inline mt-3">
+                    <span className="block-label m-0">Protocol</span>
+                    <div className="seg seg-sm" role="group" aria-label="Protocol">
+                      {(['grpc', 'connect'] as const).map((p) => (
+                        <button
+                          type="button"
+                          key={p}
+                          className={form.rpcProtocol === p ? 'on' : ''}
+                          aria-pressed={form.rpcProtocol === p}
+                          title={p === 'grpc' ? 'Native gRPC over HTTP/2' : 'Connect: a JSON POST to /<service>/<method>'}
+                          onClick={() => set('rpcProtocol', p)}
+                        >
+                          {p === 'grpc' ? 'gRPC' : 'Connect'}
+                        </button>
+                      ))}
+                    </div>
+                    <span className="hint m-0">How reflected methods are called.</span>
+                  </div>
+                )}
                 <HealthCheck
                   target={buildTarget(form.targetHost, form.targetPort)}
                   plaintext={form.plaintext}
@@ -1295,11 +1431,11 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
               <>
                 <div className="row">
                   <button className="btn-secondary" disabled={reflBusy} onClick={() => runReflect()}>
-                    {reflBusy ? 'Asking the server…' : 'Reflect services'}
+                    {reflBusy ? 'Reflecting…' : 'Reflect services'}
                   </button>
                   <span className="hint grow">Lists the server's services and methods. Needs gRPC reflection enabled.</span>
                 </div>
-                {reflErr && <div className="error">{reflErr}</div>}
+                <OutcomeView o={reflErr} secrets={[]} />
                 {reflSvcs && reflSvcs.length === 0 && (
                   <div className="hint">The server exposes no services through reflection. Use .proto files instead.</div>
                 )}
@@ -1308,21 +1444,14 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
             {reflecting && reflSvcs && reflSvcs.length > 0 && (
               <div className="refl-box">
                 <div className="refl-head">
-                  <div className="seg seg-sm" role="group" aria-label="Protocol">
-                    {(['grpc', 'connect'] as const).map((p) => (
-                      <button
-                        type="button"
-                        key={p}
-                        className={form.rpcProtocol === p ? 'on' : ''}
-                        aria-pressed={form.rpcProtocol === p}
-                        title={p === 'grpc' ? 'Native gRPC over HTTP/2' : 'Connect: a JSON POST to /<service>/<method>'}
-                        onClick={() => set('rpcProtocol', p)}
-                      >
-                        {p === 'grpc' ? 'gRPC' : 'Connect'}
-                      </button>
-                    ))}
-                  </div>
-                  <span className="hint m-0">{reflSvcs.length} services</span>
+                  <span className="hint m-0">
+                    {reflSvcs.length} service{reflSvcs.length === 1 ? '' : 's'}
+                    {reflStale && reflEntry && (
+                      <span className="text-warn" title={`Listed ${new Date(reflEntry.at).toLocaleString()} from ${reflEntry.target}`}>
+                        {' '}· saved list, may be stale
+                      </span>
+                    )}
+                  </span>
                   <span className="spacer" />
                   <button className="btn-ghost btn-sm" disabled={reflBusy} onClick={() => runReflect()}>
                     {reflBusy ? 'Refreshing…' : 'Refresh'}
@@ -1396,7 +1525,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                 <label className="field-first">Proto folder</label>
                 <LongField aria-label="Proto folder" value={form.root} spellCheck={false} onChange={(v) => set('root', v)} />
                 <div className="hint">Folder scanned for .proto files.</div>
-                {rootError && <div className="error">{rootError}</div>}
+                {rootError && <div className="error break">{rootError}</div>}
 
                 <label>
                   Proto file <span className="count">({filteredProtos.length}/{protos.length})</span>
@@ -1409,6 +1538,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                     ))}
                   </select>
                 </div>
+                {inspectErr && <div className="error break">Could not read {form.proto}: {inspectErr}</div>}
 
                 <label>Service / method</label>
                 <div className="filter-select">
@@ -1521,34 +1651,53 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
               }}
             />
             <div className="chips">
-              {form.transport === 'gateway' && (
-                <button type="button" className="chip" onClick={copyCurl}>
-                  Copy as cURL script
-                </button>
+              {form.transport === 'gateway' && current && (
+                <>
+                  <CopyButton
+                    text={() => curlScript()}
+                    label="Copy as cURL script"
+                    title="A shell script that makes this call with protoc and curl, with credential headers and URL secrets masked. {{variables}} are left as written."
+                  />
+                  <CopyButton
+                    text={() => curlScript(true)}
+                    label="Copy with secrets"
+                    title="The same script exactly as it would be sent, credentials included"
+                  />
+                </>
               )}
-              <button type="button" className="chip" onClick={copyShareLink} title="A link that opens this request, without auth">
-                Copy share link
-              </button>
+              <CopyButton text={shareLink} label="Copy share link" title="A link that opens this request, without auth" />
             </div>
           </Section>
 
           <div className="action-bar">
-            <button className="btn-primary" disabled={busy || !canInvoke} onClick={invoke} title={unsupported}>
-              {busy ? 'Invoking…' : 'Invoke'}
-            </button>
+            {busy ? (
+              <button className="btn-secondary" title="Stop waiting for this call" onClick={() => aborts.current[active.id]?.abort()}>
+                Cancel
+              </button>
+            ) : (
+              <button className="btn-primary" disabled={!canInvoke} onClick={invoke} title={unsupported}>
+                Send
+              </button>
+            )}
             {unsupported ? (
               <span className="hint text-warn">{unsupported}</span>
             ) : !canInvoke ? (
-              <span className="hint">{reflecting ? 'Reflect and pick a method first.' : 'Pick a method first.'}</span>
+              <span className="hint">
+                {reflecting
+                  ? 'Reflect and pick a method first.'
+                  : inspectErr
+                    ? 'The .proto file could not be read (see Method above).'
+                    : 'Pick a method first.'}
+              </span>
             ) : (
               <span className="hint">
-                <kbd>⌘↵</kbd> in the body also invokes
+                <kbd>{SEND_KEY}</kbd> in the body also sends
               </span>
             )}
             <span className="spacer" />
             <label className="check" title="Request timeout in milliseconds">
               Timeout
-              <input className="w-xs" value={timeout} inputMode="numeric" onChange={(e) => setTimeoutMs(e.target.value)} />
+              <input className="w-xs" value={timeout} aria-label="Timeout in milliseconds" inputMode="numeric" onChange={(e) => setTimeoutMs(e.target.value)} />
               <span className="faint">ms</span>
             </label>
           </div>
@@ -1578,71 +1727,72 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
 
           {tab === 'response' && (
             <>
-              {busy && <div className="status busy">Calling {form.rpc || 'the method'}…</div>}
+              {busy && <OutcomeView o={{ ok: false, busy: true, text: `Calling ${form.rpc || 'the method'}…` }} secrets={[]} />}
               <div className={busy && result ? 'stale' : undefined}>
-              {result &&
-                (result.ok ? (
-                  <div className={`status ${statusOk ? 'ok' : 'bad'}`}>
-                    <span>{statusLabel(result.grpcStatus)}</span>
-                    {result.grpcMessage && (
-                      <>
-                        <span className="sep">·</span>
-                        <span className="break">{result.grpcMessage}</span>
-                      </>
-                    )}
-                    <span className="sep">·</span>
-                    <span>HTTP {result.httpStatus}</span>
-                    <span className="sep">·</span>
-                    <span>{result.durationMs} ms</span>
-                    <span className="sep">·</span>
-                    <span>{result.rawBytes} B</span>
-                    {result.frames > 1 && (
-                      <>
-                        <span className="sep">·</span>
-                        <span>{result.frames} messages (stream)</span>
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  <div className="status bad">
-                    <span>Failed at {result.stage}</span>
-                    {result.httpStatus ? (
-                      <>
-                        <span className="sep">·</span>
-                        <span>HTTP {result.httpStatus}</span>
-                      </>
-                    ) : null}
-                    {result.durationMs != null && (
-                      <>
-                        <span className="sep">·</span>
-                        <span>{result.durationMs} ms</span>
-                      </>
-                    )}
-                  </div>
-                ))}
+              {result && !result.ok && (
+                <OutcomeView
+                  o={{
+                    ok: false,
+                    // a gateway that answered with something other than gRPC: its HTTP status says what
+                    text: result.httpStatus ? `HTTP ${result.httpStatus}: ${result.error}` : result.error,
+                    ms: result.durationMs,
+                    detail: result.detail,
+                    log: result.log,
+                  }}
+                  secrets={secretsMap[active.id] ?? []}
+                />
+              )}
+              {result?.ok && (
+                <div className={`status ${statusOk ? 'ok' : 'bad'}`} role="status">
+                  <span>{statusLabel(result.grpcStatus)}</span>
+                  {result.grpcMessage && (
+                    <>
+                      <span className="sep">·</span>
+                      <span className="break">{result.grpcMessage}</span>
+                    </>
+                  )}
+                  <span className="sep">·</span>
+                  <span>HTTP {result.httpStatus}</span>
+                  <span className="sep">·</span>
+                  <span>{result.durationMs} ms</span>
+                  <span className="sep">·</span>
+                  <span>{fmtBytes(result.rawBytes)}</span>
+                  {result.frames > 1 && (
+                    <>
+                      <span className="sep">·</span>
+                      <span>{result.frames} messages (stream)</span>
+                    </>
+                  )}
+                </div>
+              )}
 
               {result?.ok && (
                 <div className="result-bar">
-                  {(result.headers || result.trailers) && (
+                  {(result.headers || result.trailers || result.reqHeaders) && (
                     <button
                       type="button"
                       className={`btn-ghost btn-sm ${showHeaders ? 'btn-on' : ''}`}
                       aria-pressed={showHeaders}
+                      title="The headers sent and received, and the trailers"
                       onClick={() => setShowHeaders((s) => !s)}
                     >
-                      {showHeaders ? 'Hide headers' : 'Show headers'}
+                      Headers
                     </button>
                   )}
+                  <AttemptLogBar log={result.log} secrets={secretsMap[active.id] ?? []} />
                   <span className="spacer" />
-                  <button type="button" className="btn-ghost btn-sm" onClick={copyResponse}>
-                    Copy
-                  </button>
+                  {result.decoded && <CopyButton text={result.decoded} label="Copy response" title="Copy the decoded response" />}
                 </div>
               )}
 
               {result?.ok && showHeaders && (
                 <div className="mb-3">
-                  <HeaderTable title="Request headers (sent by Conduit)" rows={result.reqHeaders} mask={secretsMap[active.id] ?? []} />
+                  <HeaderTable
+                    title="Request headers (sent by Conduit)"
+                    rows={result.reqHeaders}
+                    mask={secretsMap[active.id] ?? []}
+                    blankCredentials
+                  />
                   <HeaderTable title="Response headers" rows={result.headers} />
                   {result.trailers && Object.keys(result.trailers).length > 0 && (
                     <HeaderTable title="Trailers" rows={result.trailers} />
@@ -1658,7 +1808,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                     hint={
                       <>
                         For a direct call: enter host and port, press <kbd>Reflect services</kbd>, pick a method, edit the
-                        JSON body, then <kbd>Invoke</kbd>. Try the public test server <code>grpcb.in:9000</code>.
+                        JSON body, then <kbd>Send</kbd>. Try the public test server <code>grpcb.in:9000</code>.
                       </>
                     }
                   >
@@ -1668,7 +1818,7 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                   </Empty>
                 )
               ) : (
-                <GrpcBody result={result} />
+                result.ok && <GrpcBody result={result} />
               )}
               </div>
             </>
@@ -1696,7 +1846,12 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
                 <Empty
                   icon="↺"
                   title="No calls yet"
-                  hint="Every Invoke is recorded here with its response. Click one to restore it; star it to keep it."
+                  hint={
+                    <>
+                      Every call you <kbd>Send</kbd> is recorded here with its response. Click one to restore it; star it to
+                      keep it.
+                    </>
+                  }
                 />
               )}
               {histEntries.map((h, i) => (
@@ -1730,7 +1885,21 @@ protoc -I . -I '${dir}' --decode=${fq(current.res)} '${form.proto}' < /tmp/p.bin
   );
 }
 
-function HeaderTable({ title, rows, mask = [] }: { title: string; rows?: Record<string, string>; mask?: string[] }) {
+/**
+ * Headers as a table, secret values masked. `blankCredentials` also blanks credential headers
+ * (Authorization, cookies, API keys), as the copied log does.
+ */
+function HeaderTable({
+  title,
+  rows,
+  mask = [],
+  blankCredentials = false,
+}: {
+  title: string;
+  rows?: Record<string, string>;
+  mask?: string[];
+  blankCredentials?: boolean;
+}) {
   const entries = Object.entries(rows ?? {});
   return (
     <>
@@ -1741,7 +1910,7 @@ function HeaderTable({ title, rows, mask = [] }: { title: string; rows?: Record<
             {entries.map(([k, v]) => (
               <tr key={k}>
                 <td>{k}</td>
-                <td>{maskSecrets(v, mask)}</td>
+                <td>{blankCredentials && isSensitiveHeader(k) ? '•••' : maskSecrets(v, mask)}</td>
               </tr>
             ))}
           </tbody>
@@ -1753,20 +1922,17 @@ function HeaderTable({ title, rows, mask = [] }: { title: string; rows?: Record<
   );
 }
 
-const GrpcBody = memo(function GrpcBody({ result }: { result: CallResult }) {
+/** A call the server answered: its error details, if any, then the decoded response. */
+const GrpcBody = memo(function GrpcBody({ result }: { result: Extract<CallResult, { ok: true }> }) {
   return (
     <>
-      {result.ok && result.statusDetails && (
+      {result.statusDetails && (
         <div className="mb-2">
           <div className="block-label">Error details</div>
           <pre>{JSON.stringify(result.statusDetails, null, 2)}</pre>
         </div>
       )}
-      <pre>
-        {result.ok
-          ? result.decoded || (result.grpcStatus === '0' ? '(empty response body)' : '(no response body)')
-          : result.error}
-      </pre>
+      <pre>{result.decoded || (result.grpcStatus === '0' ? '(empty response body)' : '(no response body)')}</pre>
     </>
   );
 });
@@ -1834,12 +2000,13 @@ function HealthCheck({
 }) {
   const [service, setService] = useState('');
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ ok: boolean; text: string; reached?: boolean } | null>(null);
+  const [result, setResult] = useState<Outcome | null>(null);
 
   // a result is about the target it was taken against
   useEffect(() => setResult(null), [target, plaintext]);
 
   const check = async () => {
+    if (busy) return;
     setBusy(true);
     setResult(null);
     let prepared: { target: string; headers: Record<string, string> };
@@ -1856,21 +2023,23 @@ function HealthCheck({
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ target: filled, plaintext, service: service.trim(), headers }),
-      }).then((x) => x.json());
+      }).then(readJson);
       setResult(
         r.ok
-          ? { ok: r.status === 'SERVING', text: `${r.status} · ${r.durationMs} ms`, reached: true }
-          : { ok: false, text: r.error ?? 'health check failed' },
+          ? r.status === 'SERVING'
+            ? { ok: true, text: 'SERVING', ms: r.durationMs, log: r.log }
+            : { ok: false, text: `The server answered ${r.status}`, ms: r.durationMs, log: r.log }
+          : { ok: false, text: r.error ?? 'health check failed', ms: r.durationMs, detail: r.detail, log: r.log },
       );
-    } catch (e) {
-      setResult({ ok: false, text: String(e) });
+    } catch (e: any) {
+      setResult({ ok: false, text: String(e?.message ?? e) });
     }
     setBusy(false);
   };
 
   return (
     <>
-      <label>
+      <label htmlFor="grpc-health-service">
         Health check{' '}
         <span
           className="help"
@@ -1881,24 +2050,21 @@ function HealthCheck({
       </label>
       <div className="row">
         <LongField
+          id="grpc-health-service"
           className="grow"
           value={service}
           spellCheck={false}
-          placeholder="service name, or empty for the whole server"
+          placeholder="service (optional)"
+          title="A service name, or empty to check the whole server"
           aria-label="Health check service"
           onChange={setService}
           onEnter={() => check()}
         />
         <button className="btn-secondary" disabled={busy} onClick={check} title="grpc.health.v1.Health/Check">
-          {busy ? 'Checking…' : 'Check health'}
+          {busy ? 'Checking…' : 'Check'}
         </button>
-        {result && (
-          <span className={`pill ${result.ok ? 'ok' : 'bad'}`} aria-live="polite" title={result.text}>
-            {result.reached ? result.text : 'Failed'}
-          </span>
-        )}
       </div>
-      {result && !result.reached && <div className="error break">{result.text}</div>}
+      <OutcomeView o={busy ? { ok: false, busy: true, text: 'Checking…' } : result} secrets={[]} />
       <div className="hint">
         Calls <code>grpc.health.v1.Health/Check</code> to see whether the server is <code>SERVING</code>. Name a service to
         check just that one.
